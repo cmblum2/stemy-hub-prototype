@@ -32,15 +32,15 @@ Level 3 can subscribe to a live stream and immediately begin modeling.
 **Full Workflow**
 1. Researcher or Sensor Generates Update
 
-  Examples:
+     Examples:
 
-    O₂ reading
+        O₂ reading
+        
+        Differentiation stage transition
 
-    Differentiation stage transition
+        Purification metric
 
-    Purification metric
-
-    Manual parameter input
+        Manual parameter input
 
 2. Level 1 Sends a PATCH
 POST /api/runs/{run_id}/patch
