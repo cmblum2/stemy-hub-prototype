@@ -1,24 +1,32 @@
-🧬 SteMy Hub (Level 1 → Level 3 Integration)
-Real-Time Experimental Telemetry via FastAPI + Fly.io + SQLite + SSE
+🧬 SteMy Hub
+Level 1 → Level 3 Real-Time Experimental Telemetry
 🔎 Overview
 
 This repository implements the Level 1 experimental telemetry hub for SteMy.
 
 It provides:
 
-Real-time streaming of experimental state updates (“patches”)
+✅ Real-time streaming of experimental state updates (“patches”)
 
-Persistent storage
+✅ Persistent storage
 
-Run isolation
+✅ Run isolation
 
-Idempotent ingestion
+✅ Idempotent ingestion
 
-Replay / recovery capability
+✅ Replay / recovery capability
 
 Level 3 can subscribe to a live stream and immediately begin modeling.
 
-This is a production-style deployment hosted on Fly.io.
+This system is deployed using:
+
+FastAPI
+
+Fly.io
+
+SQLite (persistent volume)
+
+Server-Sent Events (SSE)
 
 🏗 System Architecture
 (UI / Sensors / Simulator)
@@ -34,37 +42,42 @@ This is a production-style deployment hosted on Fly.io.
                     v
             Level 3 Modeling System
 🔁 Full Workflow (End-to-End)
-1️⃣ Researcher / Sensor generates update
+1️⃣ Researcher / Sensor Generates Update
 
-A change occurs (e.g., O₂ reading, stage transition, purification metric).
+A change occurs:
 
-2️⃣ Level 1 sends a PATCH to the Hub
+O₂ reading
+
+Differentiation stage transition
+
+Purification metric
+
+Manual parameter input
+
+2️⃣ Level 1 Sends a PATCH to the Hub
 POST /api/runs/{run_id}/patch
-3️⃣ FastAPI Hub:
+3️⃣ FastAPI Hub Performs
 
-Authenticates request
+Authentication validation
 
-Deduplicates using patch_id
+patch_id deduplication
 
-Stores patch in SQLite
+SQLite persistence
 
-Updates current state snapshot
+Snapshot update
 
-Broadcasts patch in real time to stream subscribers
+Real-time broadcast to subscribers
 
-4️⃣ Level 3 subscribes to live stream
+4️⃣ Level 3 Subscribes to Stream
 GET /api/stream/patches?run_id=RUN_DEMO_001
-5️⃣ If stream drops
-
-Level 3 calls:
-
+5️⃣ Recovery (If Stream Drops)
 GET /api/runs/{run_id}/export_events?since_ts=<timestamp>
 
-Then resumes streaming.
+Then reconnect to stream.
 
 📦 Patch Format (Data Contract)
 
-Each update is incremental and append-only.
+Each patch is incremental and append-only.
 
 {
   "run_id": "RUN_DEMO_001",
@@ -91,19 +104,19 @@ Each update is incremental and append-only.
     }
   ]
 }
-Design Principles
+🔬 Design Principles
 
-Incremental (only changed keys sent)
+Incremental updates (only changed keys sent)
 
-Append-only
+Append-only event architecture
 
-Idempotent (safe to resend)
+Idempotent ingestion via patch_id
 
-Timestamped
+Time-stamped for replay and modeling
 
-Structured metadata
+Structured metadata for downstream feature engineering
 
-🌐 Deployment Details (Fly.io)
+🌐 Deployment (Fly.io)
 Why Fly.io?
 
 Supports long-lived SSE connections
@@ -118,14 +131,11 @@ Deployment Model
 
 Single Fly machine
 
-SQLite database stored on mounted volume /data
+SQLite database stored at /data
 
 In-memory subscriber list for broadcasting
 
-Critical Fly Configuration
-
-fly.toml must include:
-
+Required fly.toml Configuration
 [mounts]
   source = "stemy_data"
   destination = "/data"
@@ -141,7 +151,7 @@ fly.toml must include:
 
 Secrets
 
-API key stored as Fly secret:
+Store API key securely:
 
 fly secrets set STEMY_API_KEY="YOUR_SECRET"
 
@@ -153,22 +163,22 @@ fly deploy
 All endpoints require:
 
 X-API-Key: YOUR_SECRET
-📡 Endpoints
+📡 API Endpoints
 
 Base URL:
 
 https://stemy-hub.fly.dev
-Ingest patch
+Ingest Patch
 POST /api/runs/{run_id}/patch
-Stream patches (SSE)
+Stream Patches (SSE)
 GET /api/stream/patches?run_id=RUN_DEMO_001
-Get current state snapshot
+Get Current Snapshot
 GET /api/runs/{run_id}/state
-Backfill missed events
+Backfill Missed Events
 GET /api/runs/{run_id}/export_events?since_ts=<ISO8601>
 🚀 2-Minute Live Demo
 
-This demo simulates:
+The demo simulates:
 
 O₂ drift
 
@@ -189,7 +199,7 @@ A patch is emitted every 2 seconds.
 Step 1 – Start Stream Listener
 curl.exe -N -H 'X-API-Key: YOUR_SECRET' "https://stemy-hub.fly.dev/api/stream/patches?run_id=RUN_DEMO_001"
 
-You should immediately see:
+You should see:
 
 event: hello
 data: {}
@@ -199,42 +209,29 @@ $env:STEMY_API_KEY="YOUR_SECRET"
 $env:STEMY_RUN_ID="RUN_DEMO_001"
 python .\simulate_stream.py
 
-You will see patches being sent every 2 seconds.
+Patches will appear in real time in the stream window.
 
-The stream window will update live.
-
-🧠 How Level 3 Should Consume Data
-1️⃣ Subscribe to SSE
-
-Keep connection open and parse patch events.
-
-2️⃣ Maintain State
-
-Apply incremental updates:
-
+🧠 Level 3 Integration Logic
+Maintain State
 for key, value in patch["kv"].items():
     state[key] = value
-3️⃣ Track patch_id
+Track
 
-Avoid double processing.
+patch_id (dedupe)
 
-4️⃣ Store last_ts
+last_ts (for recovery)
 
-Use for recovery.
+Recovery Flow
 
-5️⃣ Recovery Logic
+Call backfill endpoint with since_ts
 
-If stream disconnects:
+Apply missed updates
 
-Call /export_events?since_ts=last_ts
+Reconnect to SSE stream
 
-Apply missing updates
+📊 What This Enables
 
-Reconnect stream
-
-📊 What This Enables for Level 3
-
-You can now:
+Level 3 can now:
 
 Build baseline manifolds
 
@@ -246,9 +243,9 @@ Detect anomalies
 
 Generate intervention recommendations
 
-All without modifying Level 1 transport.
+Without modifying Level 1 transport.
 
-⚠️ MVP Limitations
+⚠️ MVP Constraints
 
 Single-machine deployment
 
@@ -260,9 +257,7 @@ Future scaling:
 
 Replace SQLite with Postgres
 
-Add Redis pub/sub for multi-machine broadcasting
-
-Architecture contract remains unchanged.
+Add Redis pub/sub for horizontal scaling
 
 🧬 Summary
 
