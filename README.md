@@ -6,15 +6,15 @@ This repository implements the Level 1 experimental telemetry hub for SteMy.
 
 It provides:
 
-  Real-time streaming of experimental state updates ("patches")
+    Real-time streaming of experimental state updates ("patches")
 
-  Persistent storage
+    Persistent storage
 
-  Run isolation
+    Run isolation
 
-  Idempotent ingestion
+    Idempotent ingestion
 
-  Replay and recovery capability
+    Replay and recovery capability
 
 Level 3 can subscribe to a live stream and immediately begin modeling.
 
