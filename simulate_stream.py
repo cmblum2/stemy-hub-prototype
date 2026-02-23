@@ -11,7 +11,7 @@ import requests
 # CONFIG (edit these)
 # -----------------------
 BASE_URL = os.getenv("STEMY_BASE_URL", "https://stemy-hub.fly.dev")
-API_KEY  = os.getenv("STEMY_API_KEY", "89310a35-6420-433b-9bc5-226955510fae0d649592-61e6-4ef1-b435-8bc5003b47e3")
+API_KEY  = os.getenv("STEMY_API_KEY", "API SECRET GOES HERE") #REPLACE WITH REAL API KEY HERE TO DEPLOY 2 STREAM MINUTE TEST
 RUN_ID   = os.getenv("STEMY_RUN_ID", "RUN_DEMO_001")
 
 INTERVAL_SEC = float(os.getenv("STEMY_INTERVAL_SEC", "2.0"))
