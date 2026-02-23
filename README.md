@@ -30,39 +30,40 @@ Level 3 can subscribe to a live stream and immediately begin modeling.
 
 
 **Full Workflow**
-1. Researcher or Sensor Generates Update
+_1. Researcher or Sensor Generates Update_
 
-     Examples:
+         Examples:
 
-        O₂ reading
+            O₂ reading
         
-        Differentiation stage transition
+            Differentiation stage transition
+    
+            Purification metric
 
-        Purification metric
+            Manual parameter input
 
-        Manual parameter input
+_ 2. Level 1 Sends a PATCH_
+        POST /api/runs/{run_id}/patch
 
-2. Level 1 Sends a PATCH
-POST /api/runs/{run_id}/patch
+_4. FastAPI Hub_
 
-4. FastAPI Hub
+    The Hub performs:
 
-The Hub performs:
+        Authentication validation
 
-    Authentication validation
+        patch_id deduplication
 
-    patch_id deduplication
+        SQLite persistence
 
-    SQLite persistence
+        Snapshot update
 
-    Snapshot update
+        Real-time broadcast to subscribers
 
-    Real-time broadcast to subscribers
-
-4. Level 3 Subscribes to Stream
+_4. Level 3 Subscribes to Stream_
 GET /api/stream/patches?run_id=RUN_DEMO_001
+_
 
-6. Recovery If Stream Drops
+_5. Recovery If Stream Drops_
 GET /api/runs/{run_id}/export_events?since_ts=<timestamp>
 
 Recommended recovery flow for level 3 deployment:
@@ -73,51 +74,52 @@ Recommended recovery flow for level 3 deployment:
 
     Resume stream
 
-    Patch Format (Data Contract)
+**Patch Format (Data Contract)**
 
-    Each patch is incremental and append-only.
+Each patch is incremental and append-only.
 
-{
-  "run_id": "RUN_DEMO_001",
-  "patch_id": "unique-id",
-  "ts": "2026-02-23T17:12:00Z",
-  "kv": {
-    "env.incubator.o2_measured_percent": {
-      "v": 5.02,
-      "t": "float",
-      "src": "sensor",
-      "q": "measured"
-    },
-    "process.diff.stage": {
-      "v": "diff.cardiac_mesoderm",
-      "t": "string",
-      "src": "inferred",
-      "q": "derived"
-    }
-  },
-  "events": [
     {
-      "type": "step_started",
-      "step_key": "diff.primitive_streak"
+      "run_id": "RUN_DEMO_001",
+      "patch_id": "unique-id",
+      "ts": "2026-02-23T17:12:00Z",
+      "kv": {
+        "env.incubator.o2_measured_percent": {
+          "v": 5.02,
+          "t": "float",
+          "src": "sensor",
+          "q": "measured"
+        },
+        "process.diff.stage": {
+          "v": "diff.cardiac_mesoderm",
+          "t": "string",
+          "src": "inferred",
+          "q": "derived"
+        }
+      },
+      "events": [
+        {
+          "type": "step_started",
+          "step_key": "diff.primitive_streak"
+        }
+      ]
     }
-  ]
-}
-API Endpoints
+**
+API Endpoints**
 
-Base URL:
+_Base URL:_
+        https://stemy-hub.fly.dev
+_Ingest Patch_
+        POST /api/runs/{run_id}/patch
+_Stream Patches (SSE)_
+        GET /api/stream/patches?run_id=RUN_DEMO_001
+_Get Current Snapshot_
+        GET /api/runs/{run_id}/state
+_Backfill Missed Events_
+        GET /api/runs/{run_id}/export_events?since_ts=<ISO8601>
 
-https://stemy-hub.fly.dev
-Ingest Patch
-POST /api/runs/{run_id}/patch
-Stream Patches (SSE)
-GET /api/stream/patches?run_id=RUN_DEMO_001
-Get Current Snapshot
-GET /api/runs/{run_id}/state
-Backfill Missed Events
-GET /api/runs/{run_id}/export_events?since_ts=<ISO8601>
-Authentication
+**Authentication**
 
-All endpoints require:
+_All endpoints require:_
 
     X-API-Key: YOUR_SECRET
 
@@ -135,16 +137,16 @@ The hub is deployed using:
 
 **Required fly.toml configuration:**
 
-[mounts]
-  source = "stemy_data"
-  destination = "/data"
-
-[http_service]
-  internal_port = 8080
-  force_https = true
-  auto_start_machines = true
-  auto_stop_machines = false
-  min_machines_running = 1
+        [mounts]
+          source = "stemy_data"
+          destination = "/data"
+        
+        [http_service]
+          internal_port = 8080
+          force_https = true
+          auto_start_machines = true
+          auto_stop_machines = false
+          min_machines_running = 1
 
 
 **2-Minute Live Demo**
