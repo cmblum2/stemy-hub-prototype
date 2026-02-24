@@ -12,7 +12,22 @@ import requests
 # -----------------------
 BASE_URL = os.getenv("STEMY_BASE_URL", "https://stemy-hub.fly.dev")
 API_KEY  = os.getenv("STEMY_API_KEY", "API SECRET GOES HERE") #REPLACE WITH REAL API KEY HERE TO DEPLOY 2 STREAM MINUTE TEST
-RUN_ID   = os.getenv("STEMY_RUN_ID", "RUN_DEMO_001")
+def get_latest_run():
+    r = requests.get(
+        f"{BASE_URL}/api/runs",
+        headers={"X-UI-Token": API_KEY}  # or X-API-Key if protected
+    )
+    r.raise_for_status()
+    runs = r.json().get("runs", [])
+    if not runs:
+        raise Exception("No runs exist")
+    return runs[0]["run_id"]  # newest first
+
+RUN_ID = os.getenv("STEMY_RUN_ID")
+
+if not RUN_ID:
+    RUN_ID = get_latest_run()
+    print(f"Auto-selected latest run: {RUN_ID}")
 
 INTERVAL_SEC = float(os.getenv("STEMY_INTERVAL_SEC", "2.0"))
 DURATION_SEC = float(os.getenv("STEMY_DURATION_SEC", "120"))  # 2 minutes demo by default
