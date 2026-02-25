@@ -3,7 +3,7 @@ import os, json, sqlite3, time, uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -12,8 +12,6 @@ API_KEY = os.getenv("STEMY_API_KEY", "")
 UI_TOKEN = os.getenv("STEMY_UI_TOKEN", "")
 
 app = FastAPI(title="SteMy Hub", version="1.0")
-
-
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -267,6 +265,63 @@ def ingest_patch(run_id: str, patch: Patch, req: Request):
     return {"ok": True, "patch_id": patch.patch_id, "deduped": False}
 
 # ----------------------------
+# Patch history (NEW) - for UI to view all patches per run
+# ----------------------------
+@app.get("/api/runs/{run_id}/patches")
+def list_patches(
+    run_id: str,
+    req: Request,
+    limit: int = Query(500, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+    order: str = Query("asc", pattern="^(asc|desc)$"),
+):
+    """
+    Returns patch history for a run so the UI can show:
+    - all patch_ids
+    - timestamps
+    - the full stored patch JSON payloads
+
+    Pagination included (limit/offset) to keep the UI fast for long runs.
+    """
+    require_auth(req)
+
+    order_sql = "ASC" if order == "asc" else "DESC"
+
+    conn = db()
+    rows = conn.execute(
+        f"""
+        SELECT patch_id, ts, patch_json
+        FROM patches
+        WHERE run_id = ?
+        ORDER BY ts {order_sql}
+        LIMIT ? OFFSET ?
+        """,
+        (run_id, limit, offset),
+    ).fetchall()
+    conn.close()
+
+    patches = []
+    for r in rows:
+        patch_payload = json.loads(r["patch_json"])
+        patches.append(
+            {
+                "run_id": run_id,
+                "patch_id": r["patch_id"],
+                "ts": r["ts"],
+                "patch": patch_payload,
+            }
+        )
+
+    return {
+        "run_id": run_id,
+        "count": len(patches),
+        "limit": limit,
+        "offset": offset,
+        "order": order,
+        "patches": patches,
+    }
+
+# ----------------------------
 # Snapshot
 # ----------------------------
 @app.get("/api/runs/{run_id}/state")
@@ -332,6 +387,8 @@ def stream_patches(req: Request, run_id: str, token: Optional[str] = None):
                 else:
                     time.sleep(0.25)
         finally:
-            subscribers[run_id].remove(q)
+            # prevent ValueError if already removed
+            if run_id in subscribers and q in subscribers[run_id]:
+                subscribers[run_id].remove(q)
 
     return StreamingResponse(gen(), media_type="text/event-stream")

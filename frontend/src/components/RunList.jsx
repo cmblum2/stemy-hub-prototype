@@ -1,32 +1,48 @@
 import { Link } from "react-router-dom";
 
 export default function RunList({ runs }) {
-  if (!runs?.length) return <div className="muted">No runs yet. Click “Start New Study”.</div>;
+  if (!runs || runs.length === 0) {
+    return <div className="muted">No runs yet.</div>;
+  }
 
   return (
-    <table className="table">
-      <thead>
-        <tr>
-          <th>Run</th>
-          <th>Status</th>
-          <th>Stage</th>
-          <th>Updated</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {runs.map((r) => (
-          <tr key={r.run_id}>
-            <td><code>{r.run_id}</code></td>
-            <td><span className="chip">{r.status}</span></td>
-            <td>{r.stage ? <span className="chip">{r.stage}</span> : <span className="muted">—</span>}</td>
-            <td className="muted">{r.updated_at}</td>
-            <td style={{ textAlign: "right" }}>
-              <Link className="btn" to={`/runs/${r.run_id}`}>Resume</Link>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <div style={{ display: "grid", gap: 10 }}>
+      {runs.map((r) => (
+        <div
+          key={r.run_id}
+          className="row"
+          style={{
+            justifyContent: "space-between",
+            alignItems: "center",
+            padding: 12,
+            border: "1px solid rgba(0,0,0,0.08)",
+            borderRadius: 12,
+          }}
+        >
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 700 }}>
+              {r.title ? r.title : r.run_id}
+            </div>
+            <div className="muted" style={{ fontSize: 12 }}>
+              <span>{r.run_id}</span>
+              {" • "}
+              <span>Status: {r.status}</span>
+              {" • "}
+              <span>Stage: {r.stage ?? "—"}</span>
+            </div>
+          </div>
+
+          <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+            <Link className="btn" to={`/runs/${encodeURIComponent(r.run_id)}`}>
+              Open Live
+            </Link>
+
+            <Link className="btn" to={`/runs/${encodeURIComponent(r.run_id)}/patches`}>
+              View Patches
+            </Link>
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }

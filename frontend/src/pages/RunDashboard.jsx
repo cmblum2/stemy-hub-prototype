@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { apiGet } from "../api";
 import { useSSE } from "../hooks/useSSE";
 import StatusBadge from "../components/StatusBadge.jsx";
@@ -47,11 +47,27 @@ export default function RunDashboard() {
             <span className="chip">{stage ? `Stage: ${stage}` : "Stage: —"}</span>
           </div>
         </div>
-        <div className="row">
-          <button className={`btn ${tab === "live" ? "primary" : ""}`} onClick={() => setTab("live")}>
+
+        <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+          {/* Home + Patch History Nav */}
+          <Link className="btn" to="/runs">
+            Home
+          </Link>
+          <Link className="btn" to={`/runs/${encodeURIComponent(runId)}/patches`}>
+            View Patches
+          </Link>
+
+          {/* Existing tabs */}
+          <button
+            className={`btn ${tab === "live" ? "primary" : ""}`}
+            onClick={() => setTab("live")}
+          >
             Live Feed
           </button>
-          <button className={`btn ${tab === "state" ? "primary" : ""}`} onClick={() => setTab("state")}>
+          <button
+            className={`btn ${tab === "state" ? "primary" : ""}`}
+            onClick={() => setTab("state")}
+          >
             Current State
           </button>
         </div>
