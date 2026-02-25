@@ -2,6 +2,8 @@
 Level 1 → Level 3 Real-Time Experimental Telemetry
 Overview
 
+More info for steps to deploy: https://docs.google.com/document/d/13hXtcnjzxGAZIlH4FyrR_KYvs8HrK4vay9_437iQ_qo/edit?usp=sharing
+
 This repository implements the Level 1 experimental telemetry hub for SteMy.
 
 It provides:
