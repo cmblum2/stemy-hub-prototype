@@ -1,0 +1,428 @@
+{
+  "version": "1.0",
+  "variables": [
+
+    {
+      "id": "maintenance.culture_setup",
+      "label": "Culture setup",
+      "section": "Stem Cell Maintenance",
+      "type": "string"
+    },
+    {
+      "id": "maintenance.ecm_type",
+      "label": "ECM type",
+      "section": "Stem Cell Maintenance",
+      "type": "string"
+    },
+    {
+      "id": "maintenance.surface_coating",
+      "label": "Surface coating",
+      "section": "Stem Cell Maintenance",
+      "type": "string"
+    },
+    {
+      "id": "maintenance.coating_uniformity",
+      "label": "Coating uniformity",
+      "section": "Stem Cell Maintenance",
+      "type": "string"
+    },
+    {
+      "id": "maintenance.micropattern_geometry",
+      "label": "Micropattern geometry",
+      "section": "Stem Cell Maintenance",
+      "type": "string"
+    },
+    {
+      "id": "maintenance.elastic_modulus",
+      "label": "Elastic modulus of substrate",
+      "section": "Stem Cell Maintenance",
+      "type": "number",
+      "unit": "kPa"
+    },
+    {
+      "id": "maintenance.media_temperature",
+      "label": "Medium temperature",
+      "section": "Stem Cell Maintenance",
+      "type": "number",
+      "unit": "C"
+    },
+
+    {
+      "id": "maintenance.matrix_type",
+      "label": "Biological matrix type",
+      "section": "Stem Cell Maintenance",
+      "type": "string"
+    },
+    {
+      "id": "maintenance.defined_protein",
+      "label": "Defined ECM protein",
+      "section": "Stem Cell Maintenance",
+      "type": "string"
+    },
+    {
+      "id": "maintenance.synthetic_surface",
+      "label": "Synthetic surface coating",
+      "section": "Stem Cell Maintenance",
+      "type": "string"
+    },
+
+    {
+      "id": "maintenance.media_composition",
+      "label": "Maintenance media composition",
+      "section": "Stem Cell Maintenance",
+      "type": "string"
+    },
+    {
+      "id": "maintenance.fgf2_concentration",
+      "label": "FGF2 concentration",
+      "section": "Stem Cell Maintenance",
+      "type": "number"
+    },
+    {
+      "id": "maintenance.egf_concentration",
+      "label": "EGF concentration",
+      "section": "Stem Cell Maintenance",
+      "type": "number"
+    },
+    {
+      "id": "maintenance.igf1_concentration",
+      "label": "IGF-1 concentration",
+      "section": "Stem Cell Maintenance",
+      "type": "number"
+    },
+    {
+      "id": "maintenance.tgfb_concentration",
+      "label": "TGF-beta concentration",
+      "section": "Stem Cell Maintenance",
+      "type": "number"
+    },
+
+    {
+      "id": "maintenance.media_prewarm_consistency",
+      "label": "Media prewarming consistency",
+      "section": "Stem Cell Maintenance",
+      "type": "string"
+    },
+
+    {
+      "id": "maintenance.co2_percent",
+      "label": "CO2 concentration",
+      "section": "Stem Cell Maintenance",
+      "type": "number",
+      "unit": "%"
+    },
+    {
+      "id": "maintenance.o2_percent",
+      "label": "O2 concentration",
+      "section": "Stem Cell Maintenance",
+      "type": "number",
+      "unit": "%"
+    },
+    {
+      "id": "maintenance.humidity_level",
+      "label": "Humidity level",
+      "section": "Stem Cell Maintenance",
+      "type": "number",
+      "unit": "%"
+    },
+    {
+      "id": "maintenance.incubator_strategy",
+      "label": "Multi-incubator allocation strategy",
+      "section": "Stem Cell Maintenance",
+      "type": "string"
+    },
+
+    {
+      "id": "maintenance.human_handling_variability",
+      "label": "Human handling variability",
+      "section": "Stem Cell Maintenance",
+      "type": "string"
+    },
+    {
+      "id": "maintenance.split_ratio",
+      "label": "Split ratio history",
+      "section": "Stem Cell Maintenance",
+      "type": "string"
+    },
+    {
+      "id": "maintenance.colony_morphology_score",
+      "label": "Colony morphology score",
+      "section": "Stem Cell Maintenance",
+      "type": "number"
+    },
+
+    {
+      "id": "maintenance.cell_line_id",
+      "label": "Cell line ID",
+      "section": "Stem Cell Maintenance",
+      "type": "string"
+    },
+    {
+      "id": "maintenance.clone_id",
+      "label": "Clone ID",
+      "section": "Stem Cell Maintenance",
+      "type": "string"
+    },
+    {
+      "id": "maintenance.passage_number",
+      "label": "Passage number",
+      "section": "Stem Cell Maintenance",
+      "type": "number"
+    },
+    {
+      "id": "maintenance.reagent_lot",
+      "label": "Reagent lot tracking",
+      "section": "Stem Cell Maintenance",
+      "type": "string"
+    },
+    {
+      "id": "maintenance.contamination_flag",
+      "label": "Contamination monitoring",
+      "section": "Stem Cell Maintenance",
+      "type": "boolean"
+    },
+    {
+      "id": "maintenance.baseline_viability",
+      "label": "Baseline viability",
+      "section": "Stem Cell Maintenance",
+      "type": "number",
+      "unit": "%"
+    },
+
+    {
+      "id": "diff.chir99021_concentration",
+      "label": "CHIR99021 concentration",
+      "section": "Differentiation",
+      "phase": "D0-D1",
+      "type": "number",
+      "unit": "uM"
+    },
+    {
+      "id": "diff.chir_exposure_time",
+      "label": "CHIR exposure duration",
+      "section": "Differentiation",
+      "phase": "D0-D1",
+      "type": "number",
+      "unit": "hours"
+    },
+    {
+      "id": "diff.basal_media_type",
+      "label": "Basal differentiation media",
+      "section": "Differentiation",
+      "phase": "D0-D1",
+      "type": "string"
+    },
+
+    {
+      "id": "diff.brachyury_percent",
+      "label": "Brachyury positive cells",
+      "section": "Differentiation",
+      "phase": "D1",
+      "type": "number",
+      "unit": "%"
+    },
+    {
+      "id": "diff.viability_d1",
+      "label": "Viability at day 1",
+      "section": "Differentiation",
+      "phase": "D1",
+      "type": "number",
+      "unit": "%"
+    },
+
+    {
+      "id": "diff.wnt_inhibitor_type",
+      "label": "Wnt inhibitor type",
+      "section": "Differentiation",
+      "phase": "D1-D3",
+      "type": "string"
+    },
+    {
+      "id": "diff.wnt_inhibitor_dose",
+      "label": "Wnt inhibitor dose",
+      "section": "Differentiation",
+      "phase": "D1-D3",
+      "type": "number",
+      "unit": "uM"
+    },
+    {
+      "id": "diff.inhibition_window",
+      "label": "Inhibition window duration",
+      "section": "Differentiation",
+      "phase": "D1-D3",
+      "type": "number",
+      "unit": "hours"
+    },
+
+    {
+      "id": "diff.nkx2_5_percent",
+      "label": "NKX2-5 percentage",
+      "section": "Differentiation",
+      "type": "number",
+      "unit": "%"
+    },
+    {
+      "id": "diff.isl1_percent",
+      "label": "ISL1 percentage",
+      "section": "Differentiation",
+      "type": "number",
+      "unit": "%"
+    },
+
+    {
+      "id": "diff.protocol_route",
+      "label": "Differentiation protocol route",
+      "section": "Differentiation",
+      "type": "string"
+    },
+    {
+      "id": "diff.secondary_modifiers",
+      "label": "Secondary modifiers",
+      "section": "Differentiation",
+      "type": "string"
+    },
+
+    {
+      "id": "diff.insulin_reintroduction_time",
+      "label": "Insulin reintroduction timing",
+      "section": "Differentiation",
+      "phase": "D3-D7",
+      "type": "timestamp"
+    },
+    {
+      "id": "diff.media_switch_time",
+      "label": "Media composition switch time",
+      "section": "Differentiation",
+      "type": "timestamp"
+    },
+    {
+      "id": "diff.lactate_selection_time",
+      "label": "Lactate selection start",
+      "section": "Differentiation",
+      "type": "timestamp"
+    },
+
+    {
+      "id": "diff.beating_onset_day",
+      "label": "Beating onset day",
+      "section": "Differentiation",
+      "type": "number"
+    },
+    {
+      "id": "diff.beating_area_percent",
+      "label": "Beating area",
+      "section": "Differentiation",
+      "type": "number",
+      "unit": "%"
+    },
+
+    {
+      "id": "diff.ctnt_percent",
+      "label": "cTnT positive cells",
+      "section": "Differentiation",
+      "type": "number",
+      "unit": "%"
+    },
+    {
+      "id": "diff.mlc2v_mlc2a_ratio",
+      "label": "MLC2v / MLC2a ratio",
+      "section": "Differentiation",
+      "type": "number"
+    },
+
+    {
+      "id": "maturation.culture_duration",
+      "label": "Differentiation culture duration",
+      "section": "Maturation",
+      "type": "number",
+      "unit": "days"
+    },
+    {
+      "id": "maturation.media_refresh_interval",
+      "label": "Media refresh interval",
+      "section": "Maturation",
+      "type": "number",
+      "unit": "days"
+    },
+
+    {
+      "id": "maturation.electrical_stimulation",
+      "label": "Electrical stimulation applied",
+      "section": "Maturation",
+      "type": "boolean"
+    },
+    {
+      "id": "maturation.pacing_frequency",
+      "label": "Pacing frequency",
+      "section": "Maturation",
+      "type": "number",
+      "unit": "Hz"
+    },
+
+    {
+      "id": "maturation.metabolic_strategy",
+      "label": "Metabolic maturation strategy",
+      "section": "Maturation",
+      "type": "string"
+    },
+
+    {
+      "id": "assay.sarcomere_alignment_score",
+      "label": "Sarcomere alignment score",
+      "section": "Functional Assay",
+      "type": "number"
+    },
+    {
+      "id": "assay.calcium_transient_amplitude",
+      "label": "Calcium transient amplitude",
+      "section": "Functional Assay",
+      "type": "number"
+    },
+    {
+      "id": "assay.beat_rate_variability",
+      "label": "Beat rate variability",
+      "section": "Functional Assay",
+      "type": "number"
+    },
+    {
+      "id": "assay.apd",
+      "label": "Action potential duration",
+      "section": "Functional Assay",
+      "type": "number",
+      "unit": "ms"
+    },
+    {
+      "id": "assay.conduction_velocity",
+      "label": "Conduction velocity",
+      "section": "Functional Assay",
+      "type": "number",
+      "unit": "cm/s"
+    },
+
+    {
+      "id": "molecular.qpcr_marker",
+      "label": "qPCR marker expression",
+      "section": "Molecular Characterization",
+      "type": "string"
+    },
+    {
+      "id": "molecular.proteomics_marker",
+      "label": "Proteomics marker",
+      "section": "Molecular Characterization",
+      "type": "string"
+    },
+    {
+      "id": "molecular.mitochondrial_density",
+      "label": "Mitochondrial density",
+      "section": "Molecular Characterization",
+      "type": "number"
+    },
+    {
+      "id": "molecular.imaging_modality",
+      "label": "Imaging modality",
+      "section": "Molecular Characterization",
+      "type": "string"
+    }
+
+  ]
+}
