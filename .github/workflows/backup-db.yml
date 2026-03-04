@@ -1,0 +1,35 @@
+name: Nightly Database Backup
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # runs every day at 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install Fly CLI
+        run: |
+          curl -L https://fly.io/install.sh | sh
+          echo "$HOME/.fly/bin" >> $GITHUB_PATH
+
+      - name: Authenticate Fly
+        run: fly auth token
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Create backup on server
+        run: |
+          fly ssh console -a stemy-hub -C "sqlite3 /data/stemy.db -cmd '.backup /data/backups/stemy-nightly.db' '.quit'"
+
+      - name: Download backup
+        run: |
+          fly sftp get -a stemy-hub /data/backups/stemy-nightly.db ./stemy-nightly.db
+
+      - name: Upload backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stemy-db-backup
+          path: stemy-nightly.db
