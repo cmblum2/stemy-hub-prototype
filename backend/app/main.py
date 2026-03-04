@@ -31,7 +31,10 @@ app.add_middleware(
 )
 
 # Fly volume mount path (from fly.toml: destination="/data")
+# IMPORTANT: Always point SQLite at the mounted volume path so data persists across deploys/restarts.
 DB_PATH = os.environ.get("STEMY_DB_PATH", "/data/stemy.db")
+DATA_DIR = os.path.dirname(DB_PATH) or "/data"
+
 
 # ---------------------------
 # Variable Catalog
@@ -146,6 +149,49 @@ def _publish(run_id: str, event: Dict[str, Any]) -> None:
 
 
 # ---------------------------
+# Persistence guardrails (CRITICAL)
+# ---------------------------
+def _iso(ts: float) -> str:
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+    except Exception:
+        return ""
+
+
+def _ensure_persistent_mount_or_crash() -> None:
+    """
+    Prevent silent data loss:
+    - If /data is not mounted (or not writable), DO NOT boot.
+    - Otherwise, your app could create a brand-new sqlite file on ephemeral disk,
+      and the UI would look like all runs disappeared.
+    """
+    # If DB_PATH points somewhere unexpected, this will still protect you.
+    if not os.path.isabs(DB_PATH):
+        raise RuntimeError(f"DB_PATH must be absolute. Got: {DB_PATH}")
+
+    if not os.path.isdir(DATA_DIR):
+        raise RuntimeError(
+            f"Persistent mount directory missing: {DATA_DIR}. "
+            f"Check fly.toml mounts (destination should be /data)."
+        )
+
+    # Write test: ensure we can create a file on the mount.
+    test_path = os.path.join(DATA_DIR, ".mount_write_test")
+    try:
+        with open(test_path, "w", encoding="utf-8") as f:
+            f.write(_now_iso_z())
+        os.remove(test_path)
+    except Exception as e:
+        raise RuntimeError(
+            f"Persistent mount not writable at {DATA_DIR}. "
+            f"Refusing to start to prevent data loss. Error: {repr(e)}"
+        )
+
+    # Ensure parent dir exists (on the mount). This is safe now that we know it's a real mount.
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+
+# ---------------------------
 # SQLite helpers
 # ---------------------------
 def connect() -> sqlite3.Connection:
@@ -159,7 +205,9 @@ def init_db() -> None:
     Create tables if missing, and MIGRATE older tables on your Fly volume
     (so deploys don't crash with 'no such column confidence' etc.)
     """
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    # IMPORTANT: do NOT silently create /data unless the mount is real.
+    _ensure_persistent_mount_or_crash()
+
     conn = connect()
     try:
         conn.execute("PRAGMA journal_mode=WAL;")
@@ -218,6 +266,7 @@ def init_db() -> None:
 
 @app.on_event("startup")
 def startup() -> None:
+    # DB init + mount checks
     init_db()
 
     # Load catalog on boot
@@ -342,6 +391,24 @@ def whoami():
         "catalog_loaded": bool(VARIABLE_CATALOG.get("variables")),
         "catalog_count": len(VARIABLE_CATALOG.get("variables", [])),
         "catalog_error": VARIABLE_CATALOG.get("error"),
+    }
+
+
+# NEW: stronger DB verification endpoint (use this whenever runs "disappear")
+@app.get("/api/debug/db")
+def debug_db():
+    exists = os.path.exists(DB_PATH)
+    size = os.path.getsize(DB_PATH) if exists else 0
+    mtime = os.path.getmtime(DB_PATH) if exists else 0
+    return {
+        "db_path": DB_PATH,
+        "data_dir": DATA_DIR,
+        "data_dir_exists": os.path.isdir(DATA_DIR),
+        "db_exists": exists,
+        "db_size_bytes": size,
+        "db_mtime_epoch": mtime,
+        "db_mtime_iso": _iso(mtime) if mtime else "",
+        "hostname": os.environ.get("HOSTNAME", ""),
     }
 
 
