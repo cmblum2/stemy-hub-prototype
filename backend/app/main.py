@@ -15,7 +15,7 @@ from app.level1.extractor import extract_candidates
 from app.level1.commit import commit_candidates
 from app.level1.ask_policy import next_question
 from app.level1.state import derive_state
-from app.level1.patches import Patch
+from app.level1.patches import Patch, make_patch  # NEW
 
 app = FastAPI()
 
@@ -34,7 +34,7 @@ app.add_middleware(
 DB_PATH = os.environ.get("STEMY_DB_PATH", "/data/stemy.db")
 
 # ---------------------------
-# Variable Catalog (NEW)
+# Variable Catalog
 # ---------------------------
 # Put your file at: backend/app/variable_catalog.json
 CATALOG_PATH = Path(__file__).parent / "variable_catalog.json"
@@ -53,7 +53,11 @@ def load_catalog() -> Dict[str, Any]:
         if not isinstance(data, dict):
             return {"version": "1.0", "variables": [], "error": "catalog is not a JSON object"}
         if "variables" not in data or not isinstance(data["variables"], list):
-            return {"version": data.get("version", "1.0"), "variables": [], "error": "catalog.variables missing/not a list"}
+            return {
+                "version": data.get("version", "1.0"),
+                "variables": [],
+                "error": "catalog.variables missing/not a list",
+            }
         return data
     except Exception as e:
         return {"version": "1.0", "variables": [], "error": f"failed to load catalog: {repr(e)}"}
@@ -96,6 +100,14 @@ class IngestReq(BaseModel):
 class RunMetaUpdateReq(BaseModel):
     title: Optional[str] = None
     notes: Optional[str] = None
+
+
+class ManualPatchReq(BaseModel):
+    key: str
+    value: Any
+    actor: Optional[str] = "researcher"
+    source: Optional[str] = "manual"
+    note: Optional[str] = None
 
 
 # ---------------------------
@@ -195,7 +207,7 @@ def init_db() -> None:
         if "patch_json" not in existing:
             conn.execute("ALTER TABLE patches ADD COLUMN patch_json TEXT;")
 
-        # Indexes (do NOT reference 'id' in index definitions for compatibility)
+        # Indexes
         conn.execute("CREATE INDEX IF NOT EXISTS idx_patches_run_ts ON patches(run_id, ts, patch_id);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_patches_run_conf ON patches(run_id, confidence);")
 
@@ -206,10 +218,10 @@ def init_db() -> None:
 
 @app.on_event("startup")
 def startup() -> None:
-    global VARIABLE_CATALOG, CATALOG_BY_ID
     init_db()
 
-    # Load catalog on boot (NEW)
+    # Load catalog on boot
+    global VARIABLE_CATALOG, CATALOG_BY_ID
     VARIABLE_CATALOG = load_catalog()
     CATALOG_BY_ID = catalog_index(VARIABLE_CATALOG)
 
@@ -293,11 +305,23 @@ def load_patch_dicts(run_id: str, limit: int = 5000, min_conf: float = 0.0) -> L
             try:
                 out.append(json.loads(pj))
             except Exception:
-                # ignore corrupted row
                 continue
         return out
     finally:
         conn.close()
+
+
+def _candidate_key(c: Any) -> str:
+    """
+    Candidates can be dataclasses/objects or dicts.
+    We only need a 'key' string for catalog gating.
+    """
+    try:
+        if isinstance(c, dict):
+            return (c.get("key") or "").strip()
+        return (getattr(c, "key", "") or "").strip()
+    except Exception:
+        return ""
 
 
 # ---------------------------
@@ -321,13 +345,11 @@ def whoami():
     }
 
 
-# NEW: expose catalog so frontend can confirm all variables exist
 @app.get("/api/catalog")
 def get_catalog():
     return VARIABLE_CATALOG
 
 
-# NEW: quick lookup by id (handy for UI + debugging)
 @app.get("/api/catalog/{var_id}")
 def get_catalog_var(var_id: str):
     vid = (var_id or "").strip()
@@ -339,7 +361,6 @@ def get_catalog_var(var_id: str):
     return {"variable": v}
 
 
-# NEW: optional reload endpoint for development (no restart needed)
 @app.post("/api/catalog/reload")
 def reload_catalog():
     global VARIABLE_CATALOG, CATALOG_BY_ID
@@ -358,10 +379,8 @@ def create_run(req: CreateRunReq) -> Dict[str, Any]:
     if not run_id:
         raise HTTPException(status_code=400, detail="run_id required")
 
-    # ensure run exists + bump updated_ts
     upsert_run_meta(run_id)
 
-    # set optional title/notes
     if req.title is not None or req.notes is not None:
         conn = connect()
         try:
@@ -381,6 +400,44 @@ def create_run(req: CreateRunReq) -> Dict[str, Any]:
         conn.close()
 
 
+# NEW: deterministic manual patch creation (catalog-backed)
+@app.post("/api/runs/{run_id}/patches/manual")
+def create_manual_patch(run_id: str, req: ManualPatchReq) -> Dict[str, Any]:
+    rid = (run_id or "").strip()
+    if not rid:
+        raise HTTPException(status_code=400, detail="run_id required")
+
+    key = (req.key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="key required")
+
+    if key not in CATALOG_BY_ID:
+        raise HTTPException(status_code=400, detail=f"Unknown catalog variable: {key}")
+
+    upsert_run_meta(rid)
+
+    patch = make_patch(
+        run_id=rid,
+        key=key,
+        value=req.value,
+        confidence=1.0,
+        evidence="manual entry",
+        source="manual",
+        actor=req.actor or "researcher",
+        note=req.note,
+    )
+
+    save_committed_patches(rid, [patch])
+    _publish(rid, {"type": "patch", "patch": patch.to_dict()})
+
+    patch_dicts = load_patch_dicts(rid, min_conf=0.0)
+    patches = [Patch(**d) for d in patch_dicts]
+    state = derive_state(patches)
+    _publish(rid, {"type": "state", "state": state})
+
+    return {"ok": True, "patch": patch.to_dict(), "state": state}
+
+
 @app.post("/api/voice/ingest")
 def ingest(req: IngestReq) -> Dict[str, Any]:
     run_id = (req.run_id or "").strip()
@@ -391,16 +448,27 @@ def ingest(req: IngestReq) -> Dict[str, Any]:
     if not text:
         raise HTTPException(status_code=400, detail="text required")
 
-    # ensure run exists
     upsert_run_meta(run_id)
 
     # Load existing patches for state derivation (unfiltered)
     existing_dicts = load_patch_dicts(run_id, min_conf=0.0)
     existing = [Patch(**d) for d in existing_dicts]
 
-    # Extract + commit (your logic)
+    # Extract candidates
     cands = extract_candidates(text)
-    committed, needs = commit_candidates(run_id, text, cands)
+
+    # NEW: catalog gate (never commit unknown variables)
+    valid_cands: List[Any] = []
+    rejected_cands: List[Any] = []
+    for c in cands or []:
+        key = _candidate_key(c)
+        if key and key in CATALOG_BY_ID:
+            valid_cands.append(c)
+        else:
+            rejected_cands.append(c)
+
+    # Commit only valid candidates
+    committed, needs = commit_candidates(run_id, text, valid_cands)
 
     # Persist committed patches (append-only)
     save_committed_patches(run_id, committed)
@@ -409,11 +477,14 @@ def ingest(req: IngestReq) -> Dict[str, Any]:
     for p in committed:
         _publish(run_id, {"type": "patch", "patch": p.to_dict()})
 
+    # Optional: publish unmapped candidates for UI debugging
+    if rejected_cands:
+        _publish(run_id, {"type": "unmapped", "rejected_candidates": rejected_cands})
+
     # Derive state from all patches
     all_patches = existing + committed
     state = derive_state(all_patches)
     question = next_question(needs, state)
-
     _publish(run_id, {"type": "state", "state": state})
 
     return {
@@ -421,6 +492,8 @@ def ingest(req: IngestReq) -> Dict[str, Any]:
         "needs_clarification": [c.__dict__ for c in needs],
         "assistant_message": question or "",
         "state": state,
+        "rejected_candidates": rejected_cands,  # NEW: for debugging
+        "catalog_gated": True,
     }
 
 
@@ -472,7 +545,6 @@ def update_run_meta(run_id: str, req: RunMetaUpdateReq) -> Dict[str, Any]:
         if req.notes is not None:
             conn.execute("UPDATE runs SET notes = ? WHERE run_id = ?", (req.notes, rid))
 
-        # bump updated_ts
         now = _now_iso_z()
         conn.execute("UPDATE runs SET updated_ts = ? WHERE run_id = ?", (now, rid))
 
@@ -536,6 +608,7 @@ async def stream_run(run_id: str):
     Sends:
       - {type:"patch", patch:{...}}
       - {type:"state", state:{...}}
+      - {type:"unmapped", rejected_candidates:[...]} (optional)
       - keepalive pings
     """
     rid = (run_id or "").strip()
