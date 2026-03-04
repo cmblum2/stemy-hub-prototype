@@ -2,7 +2,7 @@ name: Nightly Database Backup
 
 on:
   schedule:
-    - cron: "0 6 * * *" # daily at 06:00 UTC
+    - cron: "0 6 * * *"
   workflow_dispatch:
 
 jobs:
@@ -17,7 +17,15 @@ jobs:
           curl -L https://fly.io/install.sh | sh
           echo "$HOME/.fly/bin" >> $GITHUB_PATH
 
-      - name: Sanity check Fly auth
+      - name: Check token is present (masked)
+        run: |
+          if [ -z "${FLY_API_TOKEN}" ]; then
+            echo "FLY_API_TOKEN is EMPTY"
+            exit 1
+          fi
+          echo "FLY_API_TOKEN is present"
+
+      - name: Fly status (auth check)
         run: fly status -a stemy-hub
 
       - name: Ensure backup folder exists
