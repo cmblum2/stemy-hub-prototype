@@ -1,6 +1,7 @@
 // frontend/src/pages/VoiceChat.jsx
 import { useEffect, useRef, useState } from "react";
 import { apiGet, apiPost, sseRunStreamUrl } from "../api";
+import { Link } from "react-router-dom";
 
 export default function VoiceChat() {
   // --- Run selection gate ---
@@ -474,6 +475,9 @@ export default function VoiceChat() {
       ) : null}
 
       {/* Top controls */}
+      <Link to="/manual" style={{ display: "inline-block", marginBottom: 12 }}>
+  Go to Manual Patch Creator
+</Link>
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <div style={{ fontSize: 12, opacity: 0.85 }}>
           Active run: <b>{runLocked ? runId : "none selected"}</b>
@@ -891,7 +895,7 @@ export default function VoiceChat() {
                   )}
                 </div>
               </div>
-
+              
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 12, opacity: 0.8 }}>
                   Selected: <b>{universeSelectedRun || "—"}</b>
