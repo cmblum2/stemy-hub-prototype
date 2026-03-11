@@ -1,5 +1,4 @@
-# backend/app/main.py
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -10,99 +9,146 @@ import json
 import asyncio
 import time
 from pathlib import Path
+import tempfile
+from types import SimpleNamespace
+from openai import OpenAI
 
 from app.level1.extractor import extract_candidates
 from app.level1.commit import commit_candidates
 from app.level1.ask_policy import next_question
 from app.level1.state import derive_state
-from app.level1.patches import Patch, make_patch  # NEW
+from app.level1.patches import Patch, make_patch
+from app.catalog_matcher import CatalogMatcher
+
 
 app = FastAPI()
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ---------------------------
-# CORS (MVP)
+# CORS
 # ---------------------------
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # MVP; later restrict to your frontend domain
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Fly volume mount path (from fly.toml: destination="/data")
-# IMPORTANT: Always point SQLite at the mounted volume path so data persists across deploys/restarts.
+# ---------------------------
+# Database
+# ---------------------------
+
 DB_PATH = os.environ.get("STEMY_DB_PATH", "/data/stemy.db")
 DATA_DIR = os.path.dirname(DB_PATH) or "/data"
 
+# ---------------------------
+# Catalog
+# ---------------------------
 
-# ---------------------------
-# Variable Catalog
-# ---------------------------
-# Put your file at: backend/app/variable_catalog.json
 CATALOG_PATH = Path(__file__).parent / "variable_catalog.json"
 
+VARIABLE_CATALOG: Dict[str, Any] = {}
+CATALOG_BY_ID: Dict[str, Dict[str, Any]] = {}
+CATALOG_MATCHER: CatalogMatcher = None
 
-def load_catalog() -> Dict[str, Any]:
-    """
-    Loads the variable catalog from disk.
-    If missing/invalid, returns a safe empty catalog so the API still boots.
-    """
+# ---------------------------
+# In-memory pending followups
+# ---------------------------
+
+PENDING_FOLLOWUPS: Dict[str, Dict[str, Any]] = {}
+
+YES_WORDS = {"yes", "yeah", "yep", "correct", "confirm", "log it", "that's right", "do it"}
+NO_WORDS = {"no", "nope", "incorrect", "don't log it", "not exactly", "wrong"}
+
+UNCERTAINTY_PHRASES = [
+    "maybe",
+    "around",
+    "about",
+    "approximately",
+    "approx",
+    "kind of",
+    "sort of",
+    "i think",
+    "probably",
+    "roughly",
+    "seems like",
+    "looks like",
+    "almost",
+    "close to",
+]
+
+
+def is_yes(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return any(word in t for word in YES_WORDS)
+
+
+def is_no(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return any(word in t for word in NO_WORDS)
+
+
+def detect_uncertainty_flags(text: str) -> List[str]:
+    lowered = (text or "").lower()
+    return [phrase for phrase in UNCERTAINTY_PHRASES if phrase in lowered]
+
+
+def apply_uncertainty_to_candidates(
+    candidates: List[Dict[str, Any]],
+    transcript: str
+) -> List[Dict[str, Any]]:
+    flags = detect_uncertainty_flags(transcript)
+    if not flags:
+        return candidates or []
+
+    out = []
+    for c in candidates or []:
+        cc = dict(c)
+        cc["needs_confirmation"] = True
+        cc["uncertainty_flags"] = flags
+        cc["assertion_strength"] = "tentative"
+        out.append(cc)
+    return out
+
+
+def load_catalog():
     try:
-        if not CATALOG_PATH.exists():
-            return {"version": "1.0", "variables": [], "error": f"missing: {str(CATALOG_PATH)}"}
         with open(CATALOG_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return {"version": "1.0", "variables": [], "error": "catalog is not a JSON object"}
-        if "variables" not in data or not isinstance(data["variables"], list):
-            return {
-                "version": data.get("version", "1.0"),
-                "variables": [],
-                "error": "catalog.variables missing/not a list",
-            }
-        return data
-    except Exception as e:
-        return {"version": "1.0", "variables": [], "error": f"failed to load catalog: {repr(e)}"}
+            return json.load(f)
+    except Exception:
+        return {"variables": []}
 
 
-def catalog_index(catalog: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """
-    Index variables by id for quick lookup. Duplicate ids keep the first.
-    """
-    idx: Dict[str, Dict[str, Any]] = {}
+def catalog_index(catalog):
+    idx = {}
     for v in catalog.get("variables", []):
-        if not isinstance(v, dict):
-            continue
         vid = (v.get("id") or "").strip()
-        if not vid:
-            continue
-        if vid not in idx:
+        if vid:
             idx[vid] = v
     return idx
 
 
-VARIABLE_CATALOG: Dict[str, Any] = {}
-CATALOG_BY_ID: Dict[str, Dict[str, Any]] = {}
-
-
 # ---------------------------
-# Request models
+# Models
 # ---------------------------
+
 class CreateRunReq(BaseModel):
     run_id: str
     title: Optional[str] = None
     notes: Optional[str] = None
 
 
-class IngestReq(BaseModel):
+class VoiceCommitRequest(BaseModel):
     run_id: str
-    text: str
+    transcript: str
+    patch_candidates: List[Dict[str, Any]]
 
 
-class RunMetaUpdateReq(BaseModel):
-    title: Optional[str] = None
-    notes: Optional[str] = None
+class VoiceReasonRequest(BaseModel):
+    run_id: str
+    transcript: str
 
 
 class ManualPatchReq(BaseModel):
@@ -114,586 +160,593 @@ class ManualPatchReq(BaseModel):
 
 
 # ---------------------------
-# SSE broker (per-run)
+# DB helpers
 # ---------------------------
-# Each run_id -> set of asyncio.Queue subscribers
-SUBSCRIBERS: Dict[str, Set[asyncio.Queue]] = {}
 
-
-def _subscribe(run_id: str) -> asyncio.Queue:
-    q: asyncio.Queue = asyncio.Queue(maxsize=200)
-    SUBSCRIBERS.setdefault(run_id, set()).add(q)
-    return q
-
-
-def _unsubscribe(run_id: str, q: asyncio.Queue) -> None:
-    subs = SUBSCRIBERS.get(run_id)
-    if not subs:
-        return
-    subs.discard(q)
-    if not subs:
-        SUBSCRIBERS.pop(run_id, None)
-
-
-def _publish(run_id: str, event: Dict[str, Any]) -> None:
-    subs = SUBSCRIBERS.get(run_id)
-    if not subs:
-        return
-    # best-effort broadcast
-    for q in list(subs):
-        try:
-            q.put_nowait(event)
-        except Exception:
-            # queue full or closed - drop
-            pass
-
-
-# ---------------------------
-# Persistence guardrails (CRITICAL)
-# ---------------------------
-def _iso(ts: float) -> str:
-    try:
-        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
-    except Exception:
-        return ""
-
-
-def _ensure_persistent_mount_or_crash() -> None:
-    """
-    Prevent silent data loss:
-    - If /data is not mounted (or not writable), DO NOT boot.
-    - Otherwise, your app could create a brand-new sqlite file on ephemeral disk,
-      and the UI would look like all runs disappeared.
-    """
-    # If DB_PATH points somewhere unexpected, this will still protect you.
-    if not os.path.isabs(DB_PATH):
-        raise RuntimeError(f"DB_PATH must be absolute. Got: {DB_PATH}")
-
-    if not os.path.isdir(DATA_DIR):
-        raise RuntimeError(
-            f"Persistent mount directory missing: {DATA_DIR}. "
-            f"Check fly.toml mounts (destination should be /data)."
-        )
-
-    # Write test: ensure we can create a file on the mount.
-    test_path = os.path.join(DATA_DIR, ".mount_write_test")
-    try:
-        with open(test_path, "w", encoding="utf-8") as f:
-            f.write(_now_iso_z())
-        os.remove(test_path)
-    except Exception as e:
-        raise RuntimeError(
-            f"Persistent mount not writable at {DATA_DIR}. "
-            f"Refusing to start to prevent data loss. Error: {repr(e)}"
-        )
-
-    # Ensure parent dir exists (on the mount). This is safe now that we know it's a real mount.
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-
-# ---------------------------
-# SQLite helpers
-# ---------------------------
-def connect() -> sqlite3.Connection:
+def connect():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def init_db() -> None:
-    """
-    Create tables if missing, and MIGRATE older tables on your Fly volume
-    (so deploys don't crash with 'no such column confidence' etc.)
-    """
-    # IMPORTANT: do NOT silently create /data unless the mount is real.
-    _ensure_persistent_mount_or_crash()
+def init_db():
+    os.makedirs(DATA_DIR, exist_ok=True)
 
     conn = connect()
-    try:
-        conn.execute("PRAGMA journal_mode=WAL;")
 
-        # Ensure runs table exists
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS runs (
-                run_id TEXT PRIMARY KEY,
-                created_ts TEXT NOT NULL,
-                updated_ts TEXT NOT NULL,
-                title TEXT,
-                notes TEXT
-            );
-            """
-        )
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS runs(
+        run_id TEXT PRIMARY KEY,
+        created_ts TEXT,
+        updated_ts TEXT,
+        title TEXT,
+        notes TEXT
+    )
+    """)
 
-        # Ensure patches table exists (new shape)
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS patches (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id TEXT NOT NULL,
-                ts TEXT NOT NULL,
-                patch_id TEXT NOT NULL,
-                confidence REAL NOT NULL DEFAULT 1.0,
-                patch_json TEXT NOT NULL
-            );
-            """
-        )
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS patches(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT,
+        ts TEXT,
+        patch_id TEXT,
+        confidence REAL,
+        patch_json TEXT
+    )
+    """)
 
-        # MIGRATE older DBs that already had 'patches' but missing columns
-        cols = conn.execute("PRAGMA table_info(patches);").fetchall()
-        existing = {c["name"] for c in cols}
-
-        # add missing columns safely
-        if "run_id" not in existing:
-            conn.execute("ALTER TABLE patches ADD COLUMN run_id TEXT;")
-        if "ts" not in existing:
-            conn.execute("ALTER TABLE patches ADD COLUMN ts TEXT;")
-        if "patch_id" not in existing:
-            conn.execute("ALTER TABLE patches ADD COLUMN patch_id TEXT;")
-        if "confidence" not in existing:
-            conn.execute("ALTER TABLE patches ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0;")
-        if "patch_json" not in existing:
-            conn.execute("ALTER TABLE patches ADD COLUMN patch_json TEXT;")
-
-        # Indexes
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_patches_run_ts ON patches(run_id, ts, patch_id);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_patches_run_conf ON patches(run_id, confidence);")
-
-        conn.commit()
-    finally:
-        conn.close()
+    conn.commit()
+    conn.close()
 
 
-@app.on_event("startup")
-def startup() -> None:
-    # DB init + mount checks
-    init_db()
-
-    # Load catalog on boot
-    global VARIABLE_CATALOG, CATALOG_BY_ID
-    VARIABLE_CATALOG = load_catalog()
-    CATALOG_BY_ID = catalog_index(VARIABLE_CATALOG)
-
-
-def _now_iso_z() -> str:
+def now():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def upsert_run_meta(run_id: str) -> None:
-    """Create run row if missing; update updated_ts always."""
-    rid = (run_id or "").strip()
-    if not rid:
-        return
-
-    now = _now_iso_z()
+def upsert_run_meta(run_id):
     conn = connect()
-    try:
-        row = conn.execute("SELECT run_id FROM runs WHERE run_id = ?", (rid,)).fetchone()
-        if row is None:
-            conn.execute(
-                "INSERT INTO runs (run_id, created_ts, updated_ts, title, notes) VALUES (?, ?, ?, NULL, NULL)",
-                (rid, now, now),
-            )
-        else:
-            conn.execute("UPDATE runs SET updated_ts = ? WHERE run_id = ?", (now, rid))
-        conn.commit()
-    finally:
-        conn.close()
+
+    row = conn.execute(
+        "SELECT run_id FROM runs WHERE run_id=?",
+        (run_id,)
+    ).fetchone()
+
+    if not row:
+        conn.execute(
+            "INSERT INTO runs VALUES (?,?,?,?,?)",
+            (run_id, now(), now(), None, None)
+        )
+    else:
+        conn.execute(
+            "UPDATE runs SET updated_ts=? WHERE run_id=?",
+            (now(), run_id)
+        )
+
+    conn.commit()
+    conn.close()
 
 
-def save_committed_patches(run_id: str, committed: List[Patch]) -> None:
-    """Append-only patch persistence."""
+# ---------------------------
+# Patch persistence
+# ---------------------------
+
+def save_committed_patches(run_id, committed):
     if not committed:
         return
 
-    upsert_run_meta(run_id)
-
     conn = connect()
-    try:
-        rows = []
-        for p in committed:
-            d = p.to_dict()
-            rows.append(
-                (
-                    run_id,
-                    d.get("ts", _now_iso_z()),
-                    d.get("patch_id", ""),
-                    float(d.get("confidence", 1.0)),
-                    json.dumps(d),
-                )
-            )
+    rows = []
 
-        conn.executemany(
-            "INSERT INTO patches (run_id, ts, patch_id, confidence, patch_json) VALUES (?, ?, ?, ?, ?)",
-            rows,
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    for p in committed:
+        d = p.to_dict()
+        rows.append((
+            run_id,
+            d.get("ts"),
+            d.get("patch_id"),
+            float(d.get("confidence", 1.0)),
+            json.dumps(d)
+        ))
+
+    conn.executemany(
+        "INSERT INTO patches(run_id,ts,patch_id,confidence,patch_json) VALUES(?,?,?,?,?)",
+        rows
+    )
+
+    conn.commit()
+    conn.close()
 
 
-def load_patch_dicts(run_id: str, limit: int = 5000, min_conf: float = 0.0) -> List[Dict[str, Any]]:
+def load_patch_dicts(run_id, limit=5000, min_conf=0.0):
     conn = connect()
-    try:
-        rows = conn.execute(
-            """
-            SELECT patch_json
-            FROM patches
-            WHERE run_id = ? AND confidence >= ?
-            ORDER BY ts ASC, rowid ASC
-            LIMIT ?
-            """,
-            (run_id, float(min_conf), int(limit)),
-        ).fetchall()
 
-        out: List[Dict[str, Any]] = []
-        for r in rows:
-            pj = r["patch_json"]
-            if not pj:
-                continue
-            try:
-                out.append(json.loads(pj))
-            except Exception:
-                continue
-        return out
-    finally:
-        conn.close()
+    rows = conn.execute(
+        """
+        SELECT patch_json
+        FROM patches
+        WHERE run_id=? AND confidence>=?
+        ORDER BY ts ASC
+        LIMIT ?
+        """,
+        (run_id, min_conf, limit)
+    ).fetchall()
 
+    conn.close()
 
-def _candidate_key(c: Any) -> str:
-    """
-    Candidates can be dataclasses/objects or dicts.
-    We only need a 'key' string for catalog gating.
-    """
-    try:
-        if isinstance(c, dict):
-            return (c.get("key") or "").strip()
-        return (getattr(c, "key", "") or "").strip()
-    except Exception:
-        return ""
+    out = []
+    for r in rows:
+        try:
+            out.append(json.loads(r["patch_json"]))
+        except Exception:
+            pass
+
+    return out
 
 
 # ---------------------------
-# Routes
+# Startup
 # ---------------------------
-@app.get("/")
-def root():
-    return {"ok": True}
 
+@app.on_event("startup")
+def startup():
+    global VARIABLE_CATALOG, CATALOG_BY_ID, CATALOG_MATCHER
 
-@app.get("/api/debug/whoami")
-def whoami():
-    return {
-        "file": __file__,
-        "cwd": os.getcwd(),
-        "db_path": DB_PATH,
-        "catalog_path": str(CATALOG_PATH),
-        "catalog_loaded": bool(VARIABLE_CATALOG.get("variables")),
-        "catalog_count": len(VARIABLE_CATALOG.get("variables", [])),
-        "catalog_error": VARIABLE_CATALOG.get("error"),
-    }
+    init_db()
 
-
-# NEW: stronger DB verification endpoint (use this whenever runs "disappear")
-@app.get("/api/debug/db")
-def debug_db():
-    exists = os.path.exists(DB_PATH)
-    size = os.path.getsize(DB_PATH) if exists else 0
-    mtime = os.path.getmtime(DB_PATH) if exists else 0
-    return {
-        "db_path": DB_PATH,
-        "data_dir": DATA_DIR,
-        "data_dir_exists": os.path.isdir(DATA_DIR),
-        "db_exists": exists,
-        "db_size_bytes": size,
-        "db_mtime_epoch": mtime,
-        "db_mtime_iso": _iso(mtime) if mtime else "",
-        "hostname": os.environ.get("HOSTNAME", ""),
-    }
-
-
-@app.get("/api/catalog")
-def get_catalog():
-    return VARIABLE_CATALOG
-
-
-@app.get("/api/catalog/{var_id}")
-def get_catalog_var(var_id: str):
-    vid = (var_id or "").strip()
-    if not vid:
-        raise HTTPException(status_code=400, detail="var_id required")
-    v = CATALOG_BY_ID.get(vid)
-    if not v:
-        raise HTTPException(status_code=404, detail="variable not found in catalog")
-    return {"variable": v}
-
-
-@app.post("/api/catalog/reload")
-def reload_catalog():
-    global VARIABLE_CATALOG, CATALOG_BY_ID
     VARIABLE_CATALOG = load_catalog()
     CATALOG_BY_ID = catalog_index(VARIABLE_CATALOG)
+
+    CATALOG_MATCHER = CatalogMatcher(VARIABLE_CATALOG["variables"])
+
+
+# ---------------------------
+# Reasoning prompt
+# ---------------------------
+
+def build_voice_reason_prompt(run_id: str, transcript: str, state: dict, recent_patches: list) -> str:
+    catalog_vars = [
+        v["id"]
+        for v in VARIABLE_CATALOG.get("variables", [])
+        if "id" in v
+    ]
+
+    catalog_text = "\n".join(catalog_vars)
+
+    return f"""
+You are StemY, an AI research assistant that logs experiment variables.
+
+You must extract experiment variables from researcher speech.
+
+Use ONLY variables from this catalog.
+
+Available catalog variables:
+
+{catalog_text}
+
+When selecting a variable you MUST return the exact catalog id.
+
+Examples:
+
+"seeding density"
+→ maintenance.seeding_density
+
+"incubator temperature"
+→ maintenance.media_temperature
+
+"CO2 level"
+→ maintenance.co2_percent
+
+"oxygen concentration"
+→ maintenance.o2_percent
+
+"substrate stiffness"
+→ maintenance.elastic_modulus
+
+
+Confidence scoring rules:
+
+0.95–1.0 → variable explicitly stated with clear unit
+0.85–0.95 → clearly implied variable
+0.70–0.85 → reasonable inference
+<0.70 → uncertain
+
+
+Return STRICT JSON only in this format:
+
+{{
+  "assistant_text": "string",
+
+  "patch_candidates": [
+    {{
+      "key": "catalog_variable_id",
+      "value": any valid JSON value,
+      "confidence": 0.0,
+      "evidence": "quote from transcript",
+      "needs_confirmation": false
+    }}
+  ],
+
+  "followup_mode": "none | immediate | deferred",
+
+  "pending_followup": null
+}}
+
+
+If no variable applies return:
+
+"patch_candidates": []
+
+
+Current run id:
+{run_id}
+
+Current derived state:
+{json.dumps(state, indent=2)}
+
+Recent patches:
+{json.dumps(recent_patches, indent=2)}
+
+Researcher transcript:
+{transcript}
+"""
+
+
+# ---------------------------
+# Reasoning
+# ---------------------------
+
+@app.post("/api/voice/reason")
+async def voice_reason(req: VoiceReasonRequest):
+    try:
+        patch_dicts = load_patch_dicts(req.run_id)
+        patches = [Patch(**d) for d in patch_dicts]
+        state = derive_state(patches)
+
+        prompt = build_voice_reason_prompt(
+            req.run_id,
+            req.transcript,
+            state,
+            patch_dicts[-10:]
+        )
+
+        response = client.responses.create(
+            model=os.getenv("VOICE_REASON_MODEL", "gpt-5"),
+            input=prompt
+        )
+
+        raw_text = (response.output_text or "").strip()
+
+        if not raw_text:
+            return {
+                "ok": False,
+                "error": "Model returned empty output"
+            }
+
+        try:
+            parsed = json.loads(raw_text)
+        except Exception:
+            return {
+                "ok": False,
+                "error": f"Model returned non-JSON output: {raw_text}"
+            }
+
+        patch_candidates = apply_uncertainty_to_candidates(
+            parsed.get("patch_candidates", []) or [],
+            req.transcript
+        )
+        parsed["patch_candidates"] = patch_candidates
+
+        followup = next_question(
+            [SimpleNamespace(**c) for c in patch_candidates],
+            state
+        )
+
+        if followup.get("followup_mode") == "confirm_candidate":
+            assistant_text = followup["pending_followup"]["question"]
+        else:
+            assistant_text = parsed.get("assistant_text", "No structured update identified.")
+
+        parsed["assistant_text"] = assistant_text
+        parsed["followup_mode"] = followup.get("followup_mode", "none")
+        parsed["pending_followup"] = followup.get("pending_followup")
+
+        return {
+            "ok": True,
+            "reasoning": parsed
+        }
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e)
+        }
+
+
+# ---------------------------
+# Commit candidates
+# ---------------------------
+
+@app.post("/api/voice/commit_candidates")
+async def voice_commit_candidates(req: VoiceCommitRequest):
+    try:
+        rid = (req.run_id or "").strip()
+
+        if not rid:
+            raise HTTPException(status_code=400, detail="run_id required")
+
+        upsert_run_meta(rid)
+
+        threshold = float(os.getenv("VOICE_AUTO_COMMIT_THRESHOLD", "0.70"))
+
+        normalized_candidates = apply_uncertainty_to_candidates(
+            req.patch_candidates or [],
+            req.transcript
+        )
+
+        # 1) Handle pending confirmation first
+        pending = PENDING_FOLLOWUPS.get(rid)
+
+        if pending and pending.get("type") == "confirm_candidate":
+            transcript_text = (req.transcript or "").strip()
+
+            if is_yes(transcript_text):
+                c = pending["candidate"]
+
+                raw_key = (c.get("key") or "").strip()
+                confidence = float(c.get("confidence", 0))
+
+                if raw_key in CATALOG_BY_ID:
+                    key = raw_key
+                    similarity = 1.0
+                else:
+                    matched_key, similarity = CATALOG_MATCHER.match(raw_key)
+
+                    if similarity > 0.72:
+                        key = matched_key
+                        confidence *= similarity
+                    else:
+                        key = raw_key
+
+                    confidence = min(confidence, 0.98)
+
+                    if similarity < 0.8:
+                        confidence *= 0.85
+
+                if key not in CATALOG_BY_ID:
+                    PENDING_FOLLOWUPS.pop(rid, None)
+                    return {
+                        "ok": False,
+                        "error": f"Pending candidate variable not in catalog: {key}"
+                    }
+
+                patch = make_patch(
+                    run_id=rid,
+                    key=key,
+                    value=c.get("value"),
+                    confidence=confidence,
+                    evidence=c.get("evidence", ""),
+                    source="voice",
+                    actor="researcher",
+                    note=c.get("note")
+                )
+
+                committed = [patch]
+                save_committed_patches(rid, committed)
+                PENDING_FOLLOWUPS.pop(rid, None)
+
+                patch_dicts = load_patch_dicts(rid)
+                patches = [Patch(**d) for d in patch_dicts]
+                state = derive_state(patches)
+
+                return {
+                    "ok": True,
+                    "assistant": f"Logged {key} = {c.get('value')}.",
+                    "committed_patches": [p.to_dict() for p in committed],
+                    "state": state,
+                    "skipped_candidates": [],
+                    "followup": {
+                        "followup_mode": "none",
+                        "pending_followup": None
+                    }
+                }
+
+            if is_no(transcript_text):
+                PENDING_FOLLOWUPS.pop(rid, None)
+
+                patch_dicts = load_patch_dicts(rid)
+                patches = [Patch(**d) for d in patch_dicts]
+                state = derive_state(patches)
+
+                return {
+                    "ok": True,
+                    "assistant": "Okay, I did not log it. Please provide the exact value.",
+                    "committed_patches": [],
+                    "state": state,
+                    "skipped_candidates": [],
+                    "followup": {
+                        "followup_mode": "await_exact_value",
+                        "pending_followup": None
+                    }
+                }
+
+        # 2) Normal commit flow
+        committed = []
+        skipped = []
+        tentative_candidates = []
+
+        for c in normalized_candidates:
+            if c.get("needs_confirmation", False):
+                skipped.append({
+                    "candidate": c,
+                    "reason": "needs confirmation before commit"
+                })
+                tentative_candidates.append(c)
+                continue
+
+            raw_key = (c.get("key") or "").strip()
+            confidence = float(c.get("confidence", 0))
+
+            if not raw_key:
+                skipped.append({
+                    "candidate": c,
+                    "reason": "missing key"
+                })
+                continue
+
+            if raw_key in CATALOG_BY_ID:
+                key = raw_key
+                similarity = 1.0
+            else:
+                matched_key, similarity = CATALOG_MATCHER.match(raw_key)
+
+                if similarity > 0.72:
+                    key = matched_key
+                    confidence *= similarity
+                else:
+                    key = raw_key
+
+                confidence = min(confidence, 0.98)
+
+                if similarity < 0.8:
+                    confidence *= 0.85
+
+            if key not in CATALOG_BY_ID:
+                skipped.append({
+                    "candidate": c,
+                    "reason": f"LLM returned variable not in catalog: {key}"
+                })
+                continue
+
+            if confidence < threshold:
+                skipped.append({
+                    "candidate": c,
+                    "reason": f"confidence too low: {confidence:.3f} < {threshold}"
+                })
+                continue
+
+            patch = make_patch(
+                run_id=rid,
+                key=key,
+                value=c.get("value"),
+                confidence=confidence,
+                evidence=c.get("evidence", ""),
+                source="voice",
+                actor="researcher",
+                note=c.get("note")
+            )
+
+            committed.append(patch)
+
+        save_committed_patches(rid, committed)
+
+        patch_dicts = load_patch_dicts(rid)
+        patches = [Patch(**d) for d in patch_dicts]
+        state = derive_state(patches)
+
+        followup = next_question(
+            [SimpleNamespace(**c) for c in normalized_candidates],
+            state
+        )
+
+        # Store exactly the candidate that the followup is asking about
+        if (
+            followup.get("followup_mode") == "confirm_candidate"
+            and followup.get("pending_followup")
+        ):
+            pf = followup["pending_followup"]
+
+            matching_candidate = next(
+                (
+                    c for c in tentative_candidates
+                    if c.get("key") == pf.get("key")
+                    and c.get("value") == pf.get("value")
+                ),
+                None,
+            )
+
+            if matching_candidate is not None:
+                PENDING_FOLLOWUPS[rid] = {
+                    "type": "confirm_candidate",
+                    "candidate": matching_candidate
+                }
+
+        return {
+            "ok": True,
+            "committed_patches": [p.to_dict() for p in committed],
+            "state": state,
+            "skipped_candidates": skipped,
+            "followup": followup
+        }
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e)
+        }
+
+
+@app.get("/api/runs")
+def list_runs():
+    conn = connect()
+
+    rows = conn.execute(
+        """
+        SELECT run_id, created_ts, updated_ts, title, notes
+        FROM runs
+        ORDER BY created_ts DESC
+        """
+    ).fetchall()
+
+    conn.close()
+
     return {
-        "ok": True,
-        "catalog_count": len(VARIABLE_CATALOG.get("variables", [])),
-        "catalog_error": VARIABLE_CATALOG.get("error"),
+        "runs": [dict(r) for r in rows]
     }
 
 
 @app.post("/api/runs")
-def create_run(req: CreateRunReq) -> Dict[str, Any]:
-    run_id = (req.run_id or "").strip()
-    if not run_id:
-        raise HTTPException(status_code=400, detail="run_id required")
+def create_run(req: CreateRunReq):
+    rid = (req.run_id or "").strip()
 
-    upsert_run_meta(run_id)
-
-    if req.title is not None or req.notes is not None:
-        conn = connect()
-        try:
-            if req.title is not None:
-                conn.execute("UPDATE runs SET title = ? WHERE run_id = ?", (req.title, run_id))
-            if req.notes is not None:
-                conn.execute("UPDATE runs SET notes = ? WHERE run_id = ?", (req.notes, run_id))
-            conn.commit()
-        finally:
-            conn.close()
-
-    conn = connect()
-    try:
-        row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
-        return {"run": dict(row) if row else None}
-    finally:
-        conn.close()
-
-
-# NEW: deterministic manual patch creation (catalog-backed)
-@app.post("/api/runs/{run_id}/patches/manual")
-def create_manual_patch(run_id: str, req: ManualPatchReq) -> Dict[str, Any]:
-    rid = (run_id or "").strip()
     if not rid:
         raise HTTPException(status_code=400, detail="run_id required")
 
-    key = (req.key or "").strip()
-    if not key:
-        raise HTTPException(status_code=400, detail="key required")
+    conn = connect()
 
-    if key not in CATALOG_BY_ID:
-        raise HTTPException(status_code=400, detail=f"Unknown catalog variable: {key}")
-
-    upsert_run_meta(rid)
-
-    patch = make_patch(
-        run_id=rid,
-        key=key,
-        value=req.value,
-        confidence=1.0,
-        evidence="manual entry",
-        source="manual",
-        actor=req.actor or "researcher",
-        note=req.note,
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO runs(run_id,created_ts,updated_ts,title,notes)
+        VALUES(?,?,?,?,?)
+        """,
+        (
+            rid,
+            now(),
+            now(),
+            req.title,
+            req.notes
+        )
     )
 
-    save_committed_patches(rid, [patch])
-    _publish(rid, {"type": "patch", "patch": patch.to_dict()})
+    conn.commit()
+    conn.close()
 
-    patch_dicts = load_patch_dicts(rid, min_conf=0.0)
-    patches = [Patch(**d) for d in patch_dicts]
-    state = derive_state(patches)
-    _publish(rid, {"type": "state", "state": state})
-
-    return {"ok": True, "patch": patch.to_dict(), "state": state}
-
-
-@app.post("/api/voice/ingest")
-def ingest(req: IngestReq) -> Dict[str, Any]:
-    run_id = (req.run_id or "").strip()
-    text = (req.text or "").strip()
-
-    if not run_id:
-        raise HTTPException(status_code=400, detail="run_id required")
-    if not text:
-        raise HTTPException(status_code=400, detail="text required")
-
-    upsert_run_meta(run_id)
-
-    # Load existing patches for state derivation (unfiltered)
-    existing_dicts = load_patch_dicts(run_id, min_conf=0.0)
-    existing = [Patch(**d) for d in existing_dicts]
-
-    # Extract candidates
-    cands = extract_candidates(text)
-
-    # NEW: catalog gate (never commit unknown variables)
-    valid_cands: List[Any] = []
-    rejected_cands: List[Any] = []
-    for c in cands or []:
-        key = _candidate_key(c)
-        if key and key in CATALOG_BY_ID:
-            valid_cands.append(c)
-        else:
-            rejected_cands.append(c)
-
-    # Commit only valid candidates
-    committed, needs = commit_candidates(run_id, text, valid_cands)
-
-    # Persist committed patches (append-only)
-    save_committed_patches(run_id, committed)
-
-    # SSE events per committed patch
-    for p in committed:
-        _publish(run_id, {"type": "patch", "patch": p.to_dict()})
-
-    # Optional: publish unmapped candidates for UI debugging
-    if rejected_cands:
-        _publish(run_id, {"type": "unmapped", "rejected_candidates": rejected_cands})
-
-    # Derive state from all patches
-    all_patches = existing + committed
-    state = derive_state(all_patches)
-    question = next_question(needs, state)
-    _publish(run_id, {"type": "state", "state": state})
-
-    return {
-        "committed_patches": [p.to_dict() for p in committed],
-        "needs_clarification": [c.__dict__ for c in needs],
-        "assistant_message": question or "",
-        "state": state,
-        "rejected_candidates": rejected_cands,  # NEW: for debugging
-        "catalog_gated": True,
-    }
-
-
-@app.get("/api/runs")
-def list_runs(limit: int = 200) -> Dict[str, Any]:
-    conn = connect()
-    try:
-        rows = conn.execute(
-            """
-            SELECT
-              r.run_id,
-              r.created_ts,
-              r.updated_ts,
-              r.title,
-              r.notes,
-              COALESCE(p.patch_count, 0) AS patch_count,
-              COALESCE(p.last_ts, r.updated_ts) AS last_ts
-            FROM runs r
-            LEFT JOIN (
-              SELECT run_id, COUNT(*) AS patch_count, MAX(ts) AS last_ts
-              FROM patches
-              GROUP BY run_id
-            ) p
-            ON p.run_id = r.run_id
-            ORDER BY r.updated_ts DESC
-            LIMIT ?
-            """,
-            (int(limit),),
-        ).fetchall()
-        return {"runs": [dict(r) for r in rows], "count": len(rows)}
-    finally:
-        conn.close()
-
-
-@app.patch("/api/runs/{run_id}")
-def update_run_meta(run_id: str, req: RunMetaUpdateReq) -> Dict[str, Any]:
-    rid = (run_id or "").strip()
-    if not rid:
-        raise HTTPException(status_code=400, detail="run_id required")
-
-    conn = connect()
-    try:
-        row = conn.execute("SELECT run_id FROM runs WHERE run_id = ?", (rid,)).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Run not found")
-
-        if req.title is not None:
-            conn.execute("UPDATE runs SET title = ? WHERE run_id = ?", (req.title, rid))
-        if req.notes is not None:
-            conn.execute("UPDATE runs SET notes = ? WHERE run_id = ?", (req.notes, rid))
-
-        now = _now_iso_z()
-        conn.execute("UPDATE runs SET updated_ts = ? WHERE run_id = ?", (now, rid))
-
-        conn.commit()
-        out = conn.execute("SELECT * FROM runs WHERE run_id = ?", (rid,)).fetchone()
-        return {"run": dict(out) if out else None}
-    finally:
-        conn.close()
-
-
-@app.delete("/api/runs/{run_id}")
-def delete_run(run_id: str) -> Dict[str, Any]:
-    rid = (run_id or "").strip()
-    if not rid:
-        raise HTTPException(status_code=400, detail="run_id required")
-
-    conn = connect()
-    try:
-        conn.execute("DELETE FROM patches WHERE run_id = ?", (rid,))
-        cur = conn.execute("DELETE FROM runs WHERE run_id = ?", (rid,))
-        conn.commit()
-        SUBSCRIBERS.pop(rid, None)
-        return {"deleted": True, "run_id": rid, "rows": cur.rowcount}
-    finally:
-        conn.close()
+    return {"ok": True, "run_id": rid}
 
 
 @app.get("/api/runs/{run_id}/patches")
-def get_patches(
-    run_id: str,
-    limit: int = 5000,
-    min_conf: float = Query(0.0, ge=0.0, le=1.0),
-) -> Dict[str, Any]:
-    rid = (run_id or "").strip()
-    if not rid:
-        raise HTTPException(status_code=400, detail="run_id required")
+def get_patches(run_id: str):
+    patch_dicts = load_patch_dicts(run_id)
 
-    patch_dicts = load_patch_dicts(rid, limit=limit, min_conf=min_conf)
-    return {"patches": patch_dicts, "count": len(patch_dicts), "min_conf": float(min_conf)}
+    return {
+        "patches": patch_dicts
+    }
 
 
 @app.get("/api/runs/{run_id}/state")
-def get_state(
-    run_id: str,
-    limit: int = 5000,
-    min_conf: float = Query(0.0, ge=0.0, le=1.0),
-) -> Dict[str, Any]:
-    rid = (run_id or "").strip()
-    if not rid:
-        raise HTTPException(status_code=400, detail="run_id required")
-
-    patch_dicts = load_patch_dicts(rid, limit=limit, min_conf=min_conf)
+def get_state(run_id: str):
+    patch_dicts = load_patch_dicts(run_id)
     patches = [Patch(**d) for d in patch_dicts]
-    return {"state": derive_state(patches), "min_conf": float(min_conf)}
+    state = derive_state(patches)
 
-
-@app.get("/api/runs/{run_id}/stream")
-async def stream_run(run_id: str):
-    """
-    SSE stream for a run.
-    Sends:
-      - {type:"patch", patch:{...}}
-      - {type:"state", state:{...}}
-      - {type:"unmapped", rejected_candidates:[...]} (optional)
-      - keepalive pings
-    """
-    rid = (run_id or "").strip()
-    if not rid:
-        raise HTTPException(status_code=400, detail="run_id required")
-
-    q = _subscribe(rid)
-
-    async def gen():
-        try:
-            yield "event: hello\ndata: {}\n\n"
-            while True:
-                try:
-                    event = await asyncio.wait_for(q.get(), timeout=20.0)
-                    yield f"data: {json.dumps(event)}\n\n"
-                except asyncio.TimeoutError:
-                    yield "event: ping\ndata: {}\n\n"
-        finally:
-            _unsubscribe(rid, q)
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return {
+        "state": state
+    }

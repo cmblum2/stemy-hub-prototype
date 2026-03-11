@@ -422,6 +422,14 @@
       "label": "Imaging modality",
       "section": "Molecular Characterization",
       "type": "string"
+    },
+    {
+      "id": "maintenance.seeding_density",
+      "label": "Cell Seeding Density",
+      "section": "Stem Cell Maintenance",
+      "type": "number",
+      "unit": "cells/cm^2",
+      "description": "Number of cells seeded per square centimeter of culture surface."
     }
 
   ]

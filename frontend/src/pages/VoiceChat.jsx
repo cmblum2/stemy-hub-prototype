@@ -5,9 +5,9 @@ import { Link } from "react-router-dom";
 
 export default function VoiceChat() {
   // --- Run selection gate ---
-  const [runId, setRunId] = useState(""); // active run
-  const [runLocked, setRunLocked] = useState(false); // once selected/created
-  const [runs, setRuns] = useState([]); // [{run_id, ...}]
+  const [runId, setRunId] = useState("");
+  const [runLocked, setRunLocked] = useState(false);
+  const [runs, setRuns] = useState([]);
   const [runPickerOpen, setRunPickerOpen] = useState(true);
   const [newRunId, setNewRunId] = useState("");
 
@@ -24,10 +24,19 @@ export default function VoiceChat() {
   const [error, setError] = useState("");
   const [isSending, setIsSending] = useState(false);
 
-  // Voice state
+  // Voice state (existing Web Speech hold-to-talk)
   const [isListening, setIsListening] = useState(false);
   const [interim, setInterim] = useState("");
   const recognitionRef = useRef(null);
+
+  // Voice state (record -> transcribe -> reason flow)
+  const [voiceReasoning, setVoiceReasoning] = useState(null);
+  const [assistantVoiceText, setAssistantVoiceText] = useState("");
+  const [voicePatchCandidates, setVoicePatchCandidates] = useState([]);
+  const [isRecording, setIsRecording] = useState(false);
+  const [mediaRecorder, setMediaRecorder] = useState(null);
+  const [lastTranscript, setLastTranscript] = useState("");
+  const [voiceError, setVoiceError] = useState("");
 
   // Universe drawer
   const [universeOpen, setUniverseOpen] = useState(false);
@@ -38,17 +47,13 @@ export default function VoiceChat() {
   const [liveOn, setLiveOn] = useState(true);
   const esRef = useRef(null);
 
-  // ✅ Active run live updates (SSE)
+  // Active run live updates (SSE)
   const activeEsRef = useRef(null);
   const [activeLiveOn, setActiveLiveOn] = useState(true);
 
   function setErr(msg) {
     setError(msg || "");
     if (msg) console.error(msg);
-  }
-
-  function pushMessage(role, text) {
-    setMessages((prev) => [...prev, { role, text, ts: Date.now() }]);
   }
 
   function closeActiveStream() {
@@ -65,6 +70,20 @@ export default function VoiceChat() {
     }
   }
 
+  function resetRunScopedUi() {
+    setMessages([]);
+    setPatches([]);
+    setState({});
+    setInput("");
+    setInterim("");
+    setErr("");
+    setVoiceError("");
+    setLastTranscript("");
+    setVoiceReasoning(null);
+    setAssistantVoiceText("");
+    setVoicePatchCandidates([]);
+  }
+
   // -------------------------
   // Run list + selection
   // -------------------------
@@ -79,7 +98,6 @@ export default function VoiceChat() {
     }
   }
 
-  // On first load, open picker
   useEffect(() => {
     (async () => {
       await refreshRuns();
@@ -89,16 +107,10 @@ export default function VoiceChat() {
   }, []);
 
   function changeRun() {
-    // Reset local UI + force user to select/create again
     closeActiveStream();
     setRunLocked(false);
     setRunId("");
-    setMessages([]);
-    setState({});
-    setPatches([]);
-    setInput("");
-    setInterim("");
-    setErr("");
+    resetRunScopedUi();
     setRunPickerOpen(true);
   }
 
@@ -106,14 +118,9 @@ export default function VoiceChat() {
     if (!id) return;
     setErr("");
 
-    // stop previous run stream and reset UI
     closeActiveStream();
-    setMessages([]);
-    setPatches([]);
-    setState({});
-    setInterim("");
+    resetRunScopedUi();
 
-    // lock new run + close modal immediately
     setRunId(id);
     setRunLocked(true);
     setRunPickerOpen(false);
@@ -135,23 +142,18 @@ export default function VoiceChat() {
     setErr("");
     setIsSending(true);
 
-    // stop previous run stream and reset UI
     closeActiveStream();
-    setMessages([]);
-    setPatches([]);
-    setState({});
-    setInterim("");
+    resetRunScopedUi();
 
-    // close modal immediately
     setRunId(id);
     setRunLocked(true);
     setRunPickerOpen(false);
     setNewRunId("");
 
     try {
-      await apiPost("/api/runs", { run_id: id }); // ✅ writes run row to SQLite
-      await refreshRuns(); // ✅ now shows up in list
-      await Promise.all([loadStateFor(id), loadPatchesFor(id)]); // should be empty
+      await apiPost("/api/runs", { run_id: id });
+      await refreshRuns();
+      await Promise.all([loadStateFor(id), loadPatchesFor(id)]);
     } catch (e) {
       setRunLocked(false);
       setRunPickerOpen(true);
@@ -173,17 +175,230 @@ export default function VoiceChat() {
     const payload = { run_id: runId, text };
     const res = await apiPost("/api/voice/ingest", payload);
 
-    if (res?.assistant_message) pushMessage("assistant", res.assistant_message);
+    if (res?.assistant_message) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: res.assistant_message, ts: Date.now() },
+      ]);
+    }
 
     if (res?.state) setState(res.state);
     if (Array.isArray(res?.committed_patches)) {
       setPatches((prev) => [...prev, ...res.committed_patches]);
     }
 
-    // ✅ keep run list metadata fresh (patch_count, updated_ts)
     refreshRuns().catch(() => {});
-
     return res;
+  }
+
+  async function processExperimentUpdate(transcriptText) {
+    const API_BASE = import.meta.env.VITE_API_BASE || "";
+    const UI_TOKEN = import.meta.env.VITE_UI_TOKEN || "";
+
+    const reasonRes = await fetch(`${API_BASE}/api/voice/reason`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-UI-Token": UI_TOKEN,
+      },
+      body: JSON.stringify({
+        run_id: runId,
+        transcript: transcriptText,
+      }),
+    });
+
+    const reasonRaw = await reasonRes.text();
+
+    let reasonData = null;
+    try {
+      reasonData = JSON.parse(reasonRaw);
+    } catch {
+      throw new Error(
+        `Reason returned non-JSON (${reasonRes.status}): ${reasonRaw}`
+      );
+    }
+
+    if (!reasonRes.ok || !reasonData.ok) {
+      throw new Error(
+        reasonData?.error || `Reason failed with status ${reasonRes.status}`
+      );
+    }
+
+    const reasoning = reasonData.reasoning || null;
+    setVoiceReasoning(reasoning);
+    setAssistantVoiceText(reasoning?.assistant_text || "");
+    setVoicePatchCandidates(reasoning?.patch_candidates || []);
+
+    // ALWAYS call commit — backend may be holding pending confirmation
+    const commitRes = await fetch(`${API_BASE}/api/voice/commit_candidates`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-UI-Token": UI_TOKEN,
+      },
+      body: JSON.stringify({
+        run_id: runId,
+        transcript: transcriptText,
+        patch_candidates: reasoning?.patch_candidates || [],
+      }),
+    });
+
+    const commitRaw = await commitRes.text();
+
+    let commitData = null;
+    try {
+      commitData = JSON.parse(commitRaw);
+    } catch {
+      throw new Error(
+        `Commit returned non-JSON (${commitRes.status}): ${commitRaw}`
+      );
+    }
+
+    if (!commitRes.ok || !commitData.ok) {
+      throw new Error(
+        commitData?.error || `Commit failed with status ${commitRes.status}`
+      );
+    }
+
+    if (Array.isArray(commitData.committed_patches)) {
+      setPatches((prev) => [...prev, ...commitData.committed_patches]);
+    }
+
+    if (commitData.state) {
+      setState(commitData.state);
+    }
+
+    if (commitData.assistant) {
+      setAssistantVoiceText(commitData.assistant);
+    }
+
+    await Promise.all([loadPatchesFor(runId), loadStateFor(runId)]).catch(
+      () => {}
+    );
+    await refreshRuns().catch(() => {});
+
+    setMessages((prev) => {
+      const next = [
+        ...prev,
+        { role: "researcher", text: transcriptText, ts: Date.now() },
+      ];
+
+      const assistantText =
+        commitData?.assistant || reasoning?.assistant_text;
+
+      if (assistantText) {
+        next.push({
+          role: "assistant",
+          text: assistantText,
+          ts: Date.now() + 1,
+        });
+      }
+
+      return next;
+    });
+  }
+
+  async function startRecording() {
+    try {
+      if (!runLocked || !runId) {
+        setVoiceError("Select or create a Run ID first.");
+        return;
+      }
+
+      setVoiceError("");
+      setLastTranscript("");
+      setVoiceReasoning(null);
+      setAssistantVoiceText("");
+      setVoicePatchCandidates([]);
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: 1,
+        },
+      });
+
+      let mimeType = "";
+      if (MediaRecorder.isTypeSupported("audio/webm")) {
+        mimeType = "audio/webm";
+      }
+
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+
+      const chunks = [];
+
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          chunks.push(event.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        try {
+          const blob = new Blob(chunks, {
+            type: recorder.mimeType || "audio/webm",
+          });
+
+          const formData = new FormData();
+          formData.append("audio", blob, "recording.webm");
+
+          const API_BASE = import.meta.env.VITE_API_BASE || "";
+          const UI_TOKEN = import.meta.env.VITE_UI_TOKEN || "";
+
+          const transcribeRes = await fetch(`${API_BASE}/api/voice/transcribe`, {
+            method: "POST",
+            headers: {
+              "X-UI-Token": UI_TOKEN,
+            },
+            body: formData,
+          });
+
+          const transcribeRaw = await transcribeRes.text();
+
+          let transcribeData = null;
+          try {
+            transcribeData = JSON.parse(transcribeRaw);
+          } catch {
+            throw new Error(
+              `Transcribe returned non-JSON (${transcribeRes.status}): ${transcribeRaw}`
+            );
+          }
+
+          if (!transcribeRes.ok || !transcribeData.ok) {
+            throw new Error(
+              transcribeData?.error ||
+                `Transcribe failed with status ${transcribeRes.status}`
+            );
+          }
+
+          const transcriptText = transcribeData.transcript || "";
+          setLastTranscript(transcriptText);
+
+          await processExperimentUpdate(transcriptText);
+        } catch (err) {
+          setVoiceError(err.message || "Voice pipeline failed");
+        } finally {
+          stream.getTracks().forEach((track) => track.stop());
+        }
+      };
+
+      recorder.start();
+      setMediaRecorder(recorder);
+      setIsRecording(true);
+    } catch (err) {
+      setVoiceError(err.message || "Microphone access failed");
+    }
+  }
+
+  function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+      mediaRecorder.stop();
+    }
+    setIsRecording(false);
   }
 
   async function loadPatchesFor(id) {
@@ -228,21 +443,27 @@ export default function VoiceChat() {
 
   async function send() {
     setErr("");
-    if (!runLocked) {
+    setVoiceError("");
+
+    if (!runLocked || !runId) {
       setErr("Select or create a Run ID first.");
       return;
     }
+
     if (!input.trim()) return;
 
     const text = input.trim();
     setInput("");
-    pushMessage("researcher", text);
+    setLastTranscript(text);
+    setVoiceReasoning(null);
+    setAssistantVoiceText("");
+    setVoicePatchCandidates([]);
 
     setIsSending(true);
     try {
-      await ingestText(text);
+      await processExperimentUpdate(text);
     } catch (e) {
-      setErr(`POST FAILED: ${e?.message || String(e)}`);
+      setErr(`Typed reasoning failed: ${e?.message || String(e)}`);
     } finally {
       setIsSending(false);
     }
@@ -253,10 +474,9 @@ export default function VoiceChat() {
   }
 
   // -------------------------
-  // ✅ Active-run SSE (live updates for the currently selected run)
+  // Active-run SSE
   // -------------------------
   useEffect(() => {
-    // Always close any existing active-run stream first
     closeActiveStream();
 
     if (!runLocked || !runId || !activeLiveOn) return;
@@ -266,15 +486,12 @@ export default function VoiceChat() {
     activeEsRef.current = es;
 
     es.onmessage = () => {
-      // simplest: refresh patches/state and run list
       Promise.all([loadPatchesFor(runId), loadStateFor(runId)])
         .then(() => refreshRuns())
         .catch(() => {});
     };
 
-    es.onerror = () => {
-      // browser retries automatically
-    };
+    es.onerror = () => {};
 
     return () => {
       closeActiveStream();
@@ -327,11 +544,9 @@ export default function VoiceChat() {
         }
 
         const spoken = finalText.trim();
-        pushMessage("researcher", `🎙️ ${spoken}`);
-
         setIsSending(true);
         try {
-          await ingestText(spoken);
+          await processExperimentUpdate(spoken);
         } catch (e) {
           setErr(`POST FAILED (voice): ${e?.message || String(e)}`);
         } finally {
@@ -423,7 +638,6 @@ export default function VoiceChat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [universeOpen, universeSelectedRun, minConf]);
 
-  // SSE for universe-selected run
   useEffect(() => {
     closeUniverseStream();
     if (!universeOpen || !universeSelectedRun || !liveOn) return;
@@ -436,9 +650,7 @@ export default function VoiceChat() {
       universeLoadSelected(universeSelectedRun);
     };
 
-    es.onerror = () => {
-      // browser retries
-    };
+    es.onerror = () => {};
 
     return () => {
       closeUniverseStream();
@@ -446,7 +658,6 @@ export default function VoiceChat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [universeOpen, universeSelectedRun, liveOn, minConf]);
 
-  // Close Universe stream when drawer closes
   useEffect(() => {
     if (!universeOpen) closeUniverseStream();
   }, [universeOpen]);
@@ -458,7 +669,6 @@ export default function VoiceChat() {
     <div style={{ padding: 30, maxWidth: 950 }}>
       <h2 style={{ marginBottom: 8 }}>StemY Conversational Assistant</h2>
 
-      {/* Error banner */}
       {error ? (
         <div
           style={{
@@ -474,10 +684,10 @@ export default function VoiceChat() {
         </div>
       ) : null}
 
-      {/* Top controls */}
       <Link to="/manual" style={{ display: "inline-block", marginBottom: 12 }}>
-  Go to Manual Patch Creator
-</Link>
+        Go to Manual Patch Creator
+      </Link>
+
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <div style={{ fontSize: 12, opacity: 0.85 }}>
           Active run: <b>{runLocked ? runId : "none selected"}</b>
@@ -493,7 +703,6 @@ export default function VoiceChat() {
           </button>
         ) : null}
 
-        {/* ✅ Active run live toggle */}
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           <span style={{ fontSize: 12, opacity: 0.85 }}>live:</span>
           <input
@@ -541,7 +750,6 @@ export default function VoiceChat() {
         </div>
       </div>
 
-      {/* Voice controls */}
       <div style={{ marginTop: 16, display: "flex", gap: 10 }}>
         <button
           type="button"
@@ -577,13 +785,99 @@ export default function VoiceChat() {
         </button>
       </div>
 
+      <div
+        style={{
+          marginTop: 16,
+          padding: 12,
+          border: "1px solid #ccc",
+          borderRadius: 8,
+        }}
+      >
+        <h3>Voice Transcription Test</h3>
+
+        {!isRecording ? (
+          <button onClick={startRecording} disabled={!runLocked}>
+            Start Recording
+          </button>
+        ) : (
+          <button onClick={stopRecording}>Stop Recording</button>
+        )}
+
+        {lastTranscript ? (
+          <p style={{ marginTop: 12 }}>
+            <strong>Transcript:</strong> {lastTranscript}
+          </p>
+        ) : null}
+
+        {voiceError ? (
+          <p style={{ marginTop: 12, color: "red" }}>
+            <strong>Error:</strong> {voiceError}
+          </p>
+        ) : null}
+      </div>
+
+      {voiceReasoning ? (
+        <div
+          style={{
+            marginTop: 16,
+            padding: 12,
+            border: "1px solid #ccc",
+            borderRadius: 8,
+          }}
+        >
+          <h3>Voice Reasoning Result</h3>
+
+          {assistantVoiceText ? (
+            <p>
+              <strong>Assistant:</strong> {assistantVoiceText}
+            </p>
+          ) : null}
+
+          <div style={{ marginTop: 10 }}>
+            <strong>Patch Candidates:</strong>
+            <pre
+              style={{
+                marginTop: 8,
+                padding: 10,
+                borderRadius: 8,
+                border: "1px solid rgba(255,255,255,0.12)",
+                overflowX: "auto",
+              }}
+            >
+              {JSON.stringify(voicePatchCandidates, null, 2)}
+            </pre>
+          </div>
+
+          <div style={{ marginTop: 10 }}>
+            <strong>Follow-up:</strong>
+            <pre
+              style={{
+                marginTop: 8,
+                padding: 10,
+                borderRadius: 8,
+                border: "1px solid rgba(255,255,255,0.12)",
+                overflowX: "auto",
+              }}
+            >
+              {JSON.stringify(
+                {
+                  followup_mode: voiceReasoning.followup_mode,
+                  pending_followup: voiceReasoning.pending_followup,
+                },
+                null,
+                2
+              )}
+            </pre>
+          </div>
+        </div>
+      ) : null}
+
       {interim ? (
         <div style={{ marginTop: 10, opacity: 0.8 }}>
           <b>Interim:</b> {interim}
         </div>
       ) : null}
 
-      {/* Chat transcript */}
       <div
         style={{
           marginTop: 18,
@@ -610,7 +904,6 @@ export default function VoiceChat() {
         )}
       </div>
 
-      {/* Text input */}
       <div style={{ marginTop: 14, display: "flex", gap: 10 }}>
         <input
           value={input}
@@ -629,7 +922,6 @@ export default function VoiceChat() {
         </button>
       </div>
 
-      {/* Derived State */}
       <div style={{ marginTop: 26 }}>
         <h3 style={{ marginBottom: 6 }}>Derived State</h3>
         <pre
@@ -644,7 +936,6 @@ export default function VoiceChat() {
         </pre>
       </div>
 
-      {/* Patches */}
       <div style={{ marginTop: 18 }}>
         <h3 style={{ marginBottom: 6 }}>Committed Patches</h3>
         <pre
@@ -661,7 +952,6 @@ export default function VoiceChat() {
         </pre>
       </div>
 
-      {/* ---------------- Run Picker Modal ---------------- */}
       {runPickerOpen ? (
         <div
           style={{
@@ -674,7 +964,6 @@ export default function VoiceChat() {
             zIndex: 9999,
           }}
           onMouseDown={() => {
-            // allow click-outside close only if a run exists
             if (runLocked) setRunPickerOpen(false);
           }}
         >
@@ -707,7 +996,6 @@ export default function VoiceChat() {
             </div>
 
             <div style={{ display: "flex", gap: 14, marginTop: 14 }}>
-              {/* Existing runs */}
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>
                   Existing runs
@@ -758,7 +1046,6 @@ export default function VoiceChat() {
                 </div>
               </div>
 
-              {/* Create run */}
               <div style={{ width: 280 }}>
                 <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>
                   Create a new run
@@ -789,7 +1076,6 @@ export default function VoiceChat() {
         </div>
       ) : null}
 
-      {/* ---------------- Universe Drawer ---------------- */}
       {universeOpen ? (
         <div
           style={{
@@ -895,7 +1181,7 @@ export default function VoiceChat() {
                   )}
                 </div>
               </div>
-              
+
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 12, opacity: 0.8 }}>
                   Selected: <b>{universeSelectedRun || "—"}</b>
